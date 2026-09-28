@@ -1,22 +1,13 @@
 import Fastify from "fastify";
-import { pool } from "./db/connection.js";
+import dotenv from 'dotenv';
+import jobRoutes from "./jobs/jobs.routes.js";
 
-const app = Fastify();
+dotenv.config();
+const app = Fastify({ logger: false });
 
-app.get("/health", async () => {
-  return { status: "ok" };
-});
+app.register(jobRoutes);
 
-app.get("/db-test", async () => {
-  const result = await pool.query("SELECT NOW()");
-
-  return {
-    database: "connected...",
-    time: result.rows[0].now,
-  };
-});
-
-app.listen({
-  port: 3000,
-  host: "0.0.0.0",
-});
+const PORT = Number(process.env.PORT) || 3000;
+app.listen({ port: PORT, host: '0.0.0.0' }, () => {
+  console.log(`Server running at http://localhost:${PORT}`);
+})
