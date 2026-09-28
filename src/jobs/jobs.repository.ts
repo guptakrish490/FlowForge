@@ -14,3 +14,11 @@ export const createJob = async (JobData: JobData) => {
     const results = await pool.query(createJobQuery, [type, workload, max_retries, failure_probability, burst_time_ms, null, null]);
     return results.rows[0];
 }
+
+export const retrieveJobs = async () => {
+    const retrieveJobQuery =
+        `SELECT * FROM jobs;`
+
+    const results = await pool.query(retrieveJobQuery);
+    return results.rows;
+}
