@@ -1,7 +1,7 @@
 import { FastifyRequest } from "fastify";
 import { CreateJobBody } from "./jobs.types.js";
 import { randomizeByWorkload } from "../utils/random.js";
-import { createJob, retrieveJobs } from "./jobs.repository.js";
+import { createJob, retrieveJobById, retrieveJobs } from "./jobs.repository.js";
 
 
 export const createJobService = async (req: FastifyRequest<{ Body: CreateJobBody }>) => {
@@ -16,4 +16,9 @@ export const createJobService = async (req: FastifyRequest<{ Body: CreateJobBody
 export const retrieveJobService = async () => {
     const jobs = await retrieveJobs();
     return jobs;
+}
+
+export const retrieveJobByIdService = async (id: string) => {
+    const job = await retrieveJobById(id);
+    return job;
 }

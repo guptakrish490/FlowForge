@@ -22,3 +22,13 @@ export const retrieveJobs = async () => {
     const results = await pool.query(retrieveJobQuery);
     return results.rows;
 }
+
+export const retrieveJobById = async (id: string) => {
+    const retrieveJobQuery =
+        `SELECT * FROM jobs
+         WHERE
+         id=$1;`
+
+    const results = await pool.query(retrieveJobQuery, [id]);
+    return results.rows[0];
+}
