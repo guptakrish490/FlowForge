@@ -1,16 +1,15 @@
-import { updateJob } from "../jobs/jobs.repository.js";
+import { getNextQueuedJobs, updateJob } from "../jobs/jobs.repository.js";
 import { Job } from "../jobs/jobs.types.js";
 
 const wait = async (ms: number) => {
     return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-
 export const processJob: (job: Job) => Promise<Job> = async (job: Job) => {
     job.started_at = new Date();
     await wait(job.burst_time_ms);
 
-    const success = (Math.random() < job.failure_probability);
+    const success = (Math.random() > job.failure_probability);
     if (!success) {
         if (job.retry_attempt < job.max_retries) {
             job.retry_attempt++;
@@ -29,4 +28,9 @@ export const processJob: (job: Job) => Promise<Job> = async (job: Job) => {
     await updateJob(job);
 
     return job;
+}
+
+export const prefetchJobs: () => Promise<Job[]> = async () => {
+    const jobs = await getNextQueuedJobs();
+    return jobs;
 }

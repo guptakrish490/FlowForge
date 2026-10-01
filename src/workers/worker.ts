@@ -1,16 +1,21 @@
-import { getNextQueuedJob } from "../jobs/jobs.repository.js";
-import { Job } from "../jobs/jobs.types.js";
-import { processJob } from "./worker.processor.js";
+import dotenv from 'dotenv';
+dotenv.config();
 
+import { prefetchJobs, processJob } from "./worker.processor.js";
 
 
 const worker: () => Promise<void> = async () => {
 
-    while (1) {
-        const job: Job = await getNextQueuedJob();
+    let buffer = await prefetchJobs();
+    while (true) {
+        if (buffer.length <= Number(process.env.BUFFER_THRESHOLD)) {
+            buffer = await prefetchJobs();
+        }
+
+        const job = buffer.shift();
 
         if (!job) {
-            console.log("no job found!!!");
+            console.log("No Job Found!!!");
             return;
         }
 

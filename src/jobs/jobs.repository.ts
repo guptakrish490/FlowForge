@@ -33,16 +33,16 @@ export const retrieveJobById: (id: string) => Promise<Job> = async (id: string) 
     return results.rows[0];
 }
 
-export const getNextQueuedJob: () => Promise<Job> = async () => {
+export const getNextQueuedJobs: () => Promise<Job[]> = async () => {
     const query =
         `SELECT * FROM jobs
          WHERE status='QUEUED'
          ORDER BY created_at
-         LIMIT 1;`
+         LIMIT 10;`
 
     const result = await pool.query(query);
 
-    return result.rows[0];
+    return result.rows;
 }
 
 export const updateJob: (job: Job) => Promise<Job> = async (job: Job) => {
