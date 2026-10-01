@@ -9,7 +9,7 @@ const worker: () => Promise<void> = async () => {
     let buffer = await prefetchJobs();
     while (true) {
         if (buffer.length <= Number(process.env.BUFFER_THRESHOLD)) {
-            buffer = await prefetchJobs();
+            buffer.push(...await prefetchJobs());
         }
 
         const job = buffer.shift();
@@ -21,7 +21,7 @@ const worker: () => Promise<void> = async () => {
 
         const processedJob = await processJob(job);
         if (processedJob.status === 'COMPLETED') {
-            console.log(`Job - ${processedJob.id} is succesfully completed...`);
+            console.log(`Job - ${processedJob.id} : started at ${job.started_at}, completed at ${job.completed_at}`);
         }
         if (processedJob.status !== 'COMPLETED') {
             console.log(`Job - ${processedJob.id} is failed, retrying...`);

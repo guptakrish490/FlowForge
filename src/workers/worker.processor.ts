@@ -9,7 +9,7 @@ export const processJob: (job: Job) => Promise<Job> = async (job: Job) => {
     job.started_at = new Date();
     await wait(job.burst_time_ms);
 
-    const success = (Math.random() > job.failure_probability);
+    const success = (Math.random() >= job.failure_probability);
     if (!success) {
         if (job.retry_attempt < job.max_retries) {
             job.retry_attempt++;

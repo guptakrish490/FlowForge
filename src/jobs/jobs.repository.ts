@@ -35,12 +35,22 @@ export const retrieveJobById: (id: string) => Promise<Job> = async (id: string) 
 
 export const getNextQueuedJobs: () => Promise<Job[]> = async () => {
     const query =
-        `SELECT * FROM jobs
-         WHERE status='QUEUED'
-         ORDER BY created_at
-         LIMIT 10;`
+        `UPDATE jobs
+         SET
+             status='PROCESSING',
+             updated_at=NOW()
+         WHERE id IN(
+             SELECT id
+             FROM jobs
+             WHERE status='QUEUED'
+             ORDER BY created_at
+             FOR UPDATE SKIP LOCKED
+             LIMIT $1
+         )
+         RETURNING *;`
 
-    const result = await pool.query(query);
+    const bufferSize = Number(process.env.BUFFER_SIZE);
+    const result = await pool.query(query, [bufferSize]);
 
     return result.rows;
 }
@@ -48,8 +58,9 @@ export const getNextQueuedJobs: () => Promise<Job[]> = async () => {
 export const updateJob: (job: Job) => Promise<Job> = async (job: Job) => {
     const updateQuery =
         `UPDATE jobs
-         SET status=$1, retry_attempt=$2, started_at=$3, completed_at=$4
-         WHERE id=$5;`
+         SET status=$1, retry_attempt=$2, started_at=$3, completed_at=$4, updated_at=NOW()
+         WHERE id=$5
+         RETURNING *;`
 
     const result = await pool.query(updateQuery, [job.status, job.retry_attempt, job.started_at, job.completed_at, job.id]);
     return result.rows[0];
