@@ -3,17 +3,6 @@ export type CreateJobBody = {
     workload: 'LOW' | 'MEDIUM' | 'HIGH',
 }
 
-export type UpdateJobBody = {
-    type?: string,
-    workload?: 'LOW' | 'MEDIUM' | 'HIGH',
-    max_retries?: number,
-    status?: 'QUEUED' | 'PROCESSING' | 'COMPLETED' | 'FAILED',
-    retry_attempt?: number,
-    updated_at?: Date,
-    started_at?: Date,
-    completed_at?: Date,
-}
-
 export type JobParams = {
     id: string,
 }
@@ -23,16 +12,25 @@ export type CreateJobRequest = {
     Params: JobParams
 }
 
-export type UpdateJobRequest = {
-    Body: UpdateJobBody,
-    Params: JobParams
-}
-
-
 export type JobData = {
     type: string,
     workload: 'LOW' | 'MEDIUM' | 'HIGH',
     max_retries: number,
     failure_probability: number,
     burst_time_ms: number
+}
+
+export type Job = {
+    id: string,
+    type: string,
+    workload: "LOW" | "MEDIUM" | "HIGH",
+    max_retries: number,
+    failure_probability: number,
+    burst_time_ms: number,
+    status: "QUEUED" | "PROCESSING" | "COMPLETED" | "FAILED",
+    retry_attempt: number,
+    created_at: Date,
+    updated_at: Date,
+    started_at: Date,
+    completed_at: Date
 }

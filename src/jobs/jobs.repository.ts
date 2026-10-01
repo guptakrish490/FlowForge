@@ -1,7 +1,7 @@
-import { JobData } from "./jobs.types.js";
+import { Job, JobData } from "./jobs.types.js";
 import pool from "../db/connection.js";
 
-export const createJob = async (JobData: JobData) => {
+export const createJob: (JobData: JobData) => Promise<Job> = async (JobData: JobData) => {
     const { type, workload, max_retries, failure_probability, burst_time_ms } = JobData;
 
     const createJobQuery =
@@ -15,7 +15,7 @@ export const createJob = async (JobData: JobData) => {
     return results.rows[0];
 }
 
-export const retrieveJobs = async () => {
+export const retrieveJobs: () => Promise<Job[]> = async () => {
     const retrieveJobQuery =
         `SELECT * FROM jobs;`
 
@@ -23,7 +23,7 @@ export const retrieveJobs = async () => {
     return results.rows;
 }
 
-export const retrieveJobById = async (id: string) => {
+export const retrieveJobById: (id: string) => Promise<Job> = async (id: string) => {
     const retrieveJobQuery =
         `SELECT * FROM jobs
          WHERE
@@ -31,4 +31,26 @@ export const retrieveJobById = async (id: string) => {
 
     const results = await pool.query(retrieveJobQuery, [id]);
     return results.rows[0];
+}
+
+export const getNextQueuedJob: () => Promise<Job> = async () => {
+    const query =
+        `SELECT * FROM jobs
+         WHERE status='QUEUED'
+         ORDER BY created_at
+         LIMIT 1;`
+
+    const result = await pool.query(query);
+
+    return result.rows[0];
+}
+
+export const updateJob: (job: Job) => Promise<Job> = async (job: Job) => {
+    const updateQuery =
+        `UPDATE jobs
+         SET status=$1, retry_attempt=$2, started_at=$3, completed_at=$4
+         WHERE id=$5;`
+
+    const result = await pool.query(updateQuery, [job.status, job.retry_attempt, job.started_at, job.completed_at, job.id]);
+    return result.rows[0];
 }
