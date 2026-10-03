@@ -42,10 +42,10 @@ const worker: () => Promise<void> = async () => {
         // log jobs after they complete their execution
         for (let job of processedJobs) {
             if (job.status === 'COMPLETED') {
-                console.log(`[Worker-${workerId}] Job ${job.id} completed`);
+                console.log(`[${workerId}] Job ${job.id} completed`);
             }
             else {
-                console.log(`[Worker-${workerId}] Job ${job.id} failed, retrying...`);
+                console.log(`[${workerId}] Job ${job.id} failed, retrying...`);
             }
         }
 
