@@ -1,5 +1,5 @@
 import dotenv from 'dotenv';
-dotenv.config();
+dotenv.config({ quiet: true });
 
 import { prefetchJobs, processJob } from "./worker.processor.js";
 import { Job } from '../jobs/jobs.types.js';
