@@ -29,7 +29,7 @@ const worker: () => Promise<void> = async () => {
 
         // if array doesn't have jobs, means the buffer didn't have jobs, therefore return
         if (jobs.length === 0) {
-            console.log(`[Worker-${workerId}] No Jobs Found`);
+            console.log(`[${workerId}] No Jobs Found`);
             await pool.end();
             return;
         }
