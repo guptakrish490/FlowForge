@@ -257,9 +257,12 @@ FlowForge/
 │   ├── server.ts
 │   │
 │   ├── db/
-│   ├── connection.ts
-│   └── migrations/
-│   │    └── 001_create_jobs.sql
+│   │    ├── connection.ts
+│   │    └── migrations/
+│   │       └── 001_create_jobs.sql
+│   │
+│   ├── utils/
+│   │   └─── random.ts
 │   │
 │   ├── jobs/
 │   │   ├── job.routes.ts
@@ -273,9 +276,11 @@ FlowForge/
 │       ├── worker.processor.ts
 │       └── launcher.ts
 │
-├── .env
+├── .env.example
 ├── .gitignore
 ├── package.json
+├── README.md
+├── LICENSE
 ├── package-lock.json
 └── tsconfig.json
 ```
