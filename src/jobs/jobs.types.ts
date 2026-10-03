@@ -32,5 +32,6 @@ export type Job = {
     created_at: Date,
     updated_at: Date,
     started_at: Date,
-    completed_at: Date
+    completed_at: Date,
+    worker_id: string | null
 }

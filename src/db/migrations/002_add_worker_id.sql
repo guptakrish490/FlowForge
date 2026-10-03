@@ -1,0 +1,2 @@
+ALTER TABLE jobs
+ADD COLUMN worker_id VARCHAR(100);

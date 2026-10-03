@@ -25,12 +25,14 @@ export const processJob: (job: Job) => Promise<Job> = async (job: Job) => {
         job.completed_at = new Date();
     }
 
+    job.worker_id = null;
+
     await updateJob(job);
 
     return job;
 }
 
-export const prefetchJobs: () => Promise<Job[]> = async () => {
-    const jobs = await getNextQueuedJobs();
+export const prefetchJobs: (worker_id: string) => Promise<Job[]> = async (worker_id) => {
+    const jobs = await getNextQueuedJobs(worker_id);
     return jobs;
 }
