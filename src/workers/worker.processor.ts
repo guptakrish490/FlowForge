@@ -6,10 +6,16 @@ export const wait = async (ms: number) => {
 }
 
 export const processJob: (job: Job) => Promise<Job> = async (job: Job) => {
+    // job starts
     job.started_at = new Date();
+
+    // process job till its burst time
     await wait(job.burst_time_ms);
 
+    // determine success or failure
     const success = (Math.random() >= job.failure_probability);
+
+    // when job fails, retry or mark failed / reset attributes to null if failed
     if (!success) {
         if (job.retry_attempt < job.max_retries) {
             job.retry_attempt++;
@@ -17,19 +23,25 @@ export const processJob: (job: Job) => Promise<Job> = async (job: Job) => {
         }
         else {
             job.status = 'FAILED';
+            job.completed_at = null;
+            job.started_at = null;
         }
     }
 
+    // when job completes, mark completed with completion time
     else {
         job.status = 'COMPLETED';
         job.completed_at = new Date();
     }
 
-    job.worker_id = null;
+    // after processing, mark claimed_at time to null, since it's either queued again or failed.
+    job.claimed_at = null;
 
-    await updateJob(job);
+    // update all values to db
+    const updatedJob = await updateJob(job);
 
-    return job;
+    // return updated job
+    return updatedJob;
 }
 
 export const prefetchJobs: (worker_id: string) => Promise<Job[]> = async (worker_id) => {

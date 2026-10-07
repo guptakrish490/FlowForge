@@ -38,8 +38,9 @@ export const getNextQueuedJobs: (worker_id: string) => Promise<Job[]> = async (w
         `UPDATE jobs
          SET
              status='PROCESSING',
-             updated_at=NOW(),
-             worker_id=$1
+             worker_id=$1,
+             claimed_at=NOW(),
+             updated_at=NOW()
          WHERE id IN(
              SELECT id
              FROM jobs
@@ -59,11 +60,21 @@ export const getNextQueuedJobs: (worker_id: string) => Promise<Job[]> = async (w
 export const updateJob: (job: Job) => Promise<Job> = async (job: Job) => {
     const updateQuery =
         `UPDATE jobs
-         SET status=$1, retry_attempt=$2, started_at=$3, completed_at=$4, worker_id=$5, updated_at=NOW()
-         WHERE id=$6
+         SET 
+            status=$1, 
+            retry_attempt=$2, 
+            started_at=$3, 
+            completed_at=$4, 
+            worker_id=null,
+            claimed_at=null,
+            updated_at=NOW()
+         WHERE 
+            id=$5
+            AND status='PROCESSING'
+            AND worker_id=$6
          RETURNING *;`
 
-    const result = await pool.query(updateQuery, [job.status, job.retry_attempt, job.started_at, job.completed_at, job.worker_id, job.id]);
+    const result = await pool.query(updateQuery, [job.status, job.retry_attempt, job.started_at, job.completed_at, job.id, job.worker_id]);
     return result.rows[0];
 }
 
@@ -72,13 +83,13 @@ export const recoverStaleJob: () => Promise<Job[]> = async () => {
 
     const query =
         `UPDATE jobs
-         SET status='QUEUED', worker_id=null, updated_at=NOW()
+         SET status='QUEUED', claimed_at=null, worker_id=null, updated_at=NOW()
          WHERE 
             status='PROCESSING' 
             AND 
             worker_id IS NOT NULL
             AND
-            started_at < NOW() - ($1 * INTERVAL '1 millisecond')
+            claimed_at < NOW() - ($1 * INTERVAL '1 millisecond')
          RETURNING *;`
 
     const result = await pool.query(query, [timeout]);

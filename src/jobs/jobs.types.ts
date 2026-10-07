@@ -31,7 +31,8 @@ export type Job = {
     retry_attempt: number,
     created_at: Date,
     updated_at: Date,
-    started_at: Date,
-    completed_at: Date,
+    started_at: Date | null,
+    completed_at: Date | null,
+    claimed_at: Date | null,
     worker_id: string | null
 }
