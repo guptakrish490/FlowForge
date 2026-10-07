@@ -42,10 +42,14 @@ const worker: () => Promise<void> = async () => {
             if (job) jobs.push(job);
         }
 
-        // if array doesn't have jobs, don't hammer db, and wait few seconds before calling db for jobs again 
+        // if array doesn't have jobs, instead of hammering db, we wait few seconds before calling db for jobs again 
         if (jobs.length === 0) {
             console.log(`[${workerId}] Job queue is empty, waiting for jobs...`);
-            return;
+
+            const interval = Number(process.env.IDLE_POLL_INTERVAL_MS);
+            await wait(interval);
+
+            continue;
         }
 
         // process all jobs in array concurrently
