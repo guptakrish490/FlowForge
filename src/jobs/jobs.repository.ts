@@ -66,3 +66,22 @@ export const updateJob: (job: Job) => Promise<Job> = async (job: Job) => {
     const result = await pool.query(updateQuery, [job.status, job.retry_attempt, job.started_at, job.completed_at, job.worker_id, job.id]);
     return result.rows[0];
 }
+
+export const recoverStaleJob: () => Promise<Job[]> = async () => {
+    const timeout = Number(process.env.JOB_LEASE_TIMEOUT_MS);
+
+    const query =
+        `UPDATE jobs
+         SET status='QUEUED', worker_id=null, updated_at=NOW()
+         WHERE 
+            status='PROCESSING' 
+            AND 
+            worker_id IS NOT NULL
+            AND
+            started_at < NOW() - ($1 * INTERVAL '1 millisecond')
+         RETURNING *;`
+
+    const result = await pool.query(query, [timeout]);
+
+    return result.rows;
+}

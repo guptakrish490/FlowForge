@@ -1,18 +1,33 @@
 import dotenv from 'dotenv';
 dotenv.config({ quiet: true });
 
-import { prefetchJobs, processJob } from "./worker.processor.js";
+import { prefetchJobs, processJob, wait } from "./worker.processor.js";
 import { Job } from '../jobs/jobs.types.js';
-import pool from '../db/connection.js';
+import { recoverStaleJob } from '../jobs/jobs.repository.js';
 
+// worker id
 const workerId = `worker-${process.argv[2] ?? "unknown"}`;
 
+// worker process
 const worker: () => Promise<void> = async () => {
 
+    // prefetching jobs into buffer
     let buffer = await prefetchJobs(workerId);
     const concurrency = Number(process.env.WORKER_CONCURRENCY);
 
+    let lastRecovery = 0;
+    const recoveryInterval = Number(process.env.JOB_RECOVERY_INTERVAL_MS);
+
     while (true) {
+
+        // recover stale jobs by calling in a fixed interval...
+        const now = Date.now();
+
+        if (now - lastRecovery >= recoveryInterval) {
+            // recover jobs that becomes stale
+            await recoverStaleJob();
+            lastRecovery = now;
+        }
 
         // prefetch jobs before the buffer gets empty to continue the smooth execution
         if (buffer.length <= Number(process.env.BUFFER_THRESHOLD)) {
@@ -27,10 +42,9 @@ const worker: () => Promise<void> = async () => {
             if (job) jobs.push(job);
         }
 
-        // if array doesn't have jobs, means the buffer didn't have jobs, therefore return
+        // if array doesn't have jobs, don't hammer db, and wait few seconds before calling db for jobs again 
         if (jobs.length === 0) {
-            console.log(`[${workerId}] No Jobs Found`);
-            await pool.end();
+            console.log(`[${workerId}] Job queue is empty, waiting for jobs...`);
             return;
         }
 

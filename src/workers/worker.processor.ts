@@ -1,7 +1,7 @@
 import { getNextQueuedJobs, updateJob } from "../jobs/jobs.repository.js";
 import { Job } from "../jobs/jobs.types.js";
 
-const wait = async (ms: number) => {
+export const wait = async (ms: number) => {
     return new Promise(resolve => setTimeout(resolve, ms));
 }
 
