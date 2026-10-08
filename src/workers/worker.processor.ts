@@ -23,9 +23,9 @@ export const processJob: (job: Job) => Promise<Job> = async (job: Job) => {
         }
         else {
             job.status = 'FAILED';
-            job.completed_at = null;
-            job.started_at = null;
         }
+        job.started_at = null;
+        job.completed_at = null;
     }
 
     // when job completes, mark completed with completion time

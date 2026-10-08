@@ -67,7 +67,7 @@ const worker: () => Promise<void> = async () => {
                 console.error(`[${workerId}] Error processing job ${job.id} : `, result.reason)
             }
             else {
-                if (job.status === 'COMPLETED') {
+                if (result.value.status === 'COMPLETED') {
                     console.log(`[${workerId}] Job ${job.id} completed`);
                 }
                 else {
