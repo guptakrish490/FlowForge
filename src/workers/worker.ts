@@ -53,17 +53,26 @@ const worker: () => Promise<void> = async () => {
         }
 
         // process all jobs in array concurrently
-        const processedJobs = await Promise.all(
+        const results = await Promise.allSettled(
             jobs.map(job => processJob(job))
         );
 
         // log jobs after they complete their execution
-        for (let job of processedJobs) {
-            if (job.status === 'COMPLETED') {
-                console.log(`[${workerId}] Job ${job.id} completed`);
+        for (let i = 0; i < results.length; i++) {
+
+            const job = jobs[i];
+            const result = results[i];
+
+            if (result.status === 'rejected') {
+                console.error(`[${workerId}] Error processing job ${job.id} : `, result.reason)
             }
             else {
-                console.log(`[${workerId}] Job ${job.id} failed, retrying...`);
+                if (job.status === 'COMPLETED') {
+                    console.log(`[${workerId}] Job ${job.id} completed`);
+                }
+                else {
+                    console.log(`[${workerId}] Job ${job.id} failed, retrying...`);
+                }
             }
         }
 
