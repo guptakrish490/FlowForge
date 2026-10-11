@@ -128,3 +128,16 @@ export const releaseBufferedJobs = async (workerId: string, jobIds: string[]): P
 
     return result.rows;
 }
+
+export const renewWorkerLeases = async (workerId: string): Promise<void> => {
+    const query =
+        `UPDATE jobs
+         SET
+            claimed_at=now(),
+            updated_at=now()
+         WHERE
+            status='PROCESSING'
+            AND worker_id= $1;`
+
+    await pool.query(query, [workerId]);
+}

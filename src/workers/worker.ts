@@ -3,7 +3,7 @@ dotenv.config({ quiet: true });
 
 import { prefetchJobs, processJob, wait } from "./worker.processor.js";
 import { Job } from '../jobs/jobs.types.js';
-import { recoverStaleJob, releaseBufferedJobs } from '../jobs/jobs.repository.js';
+import { recoverStaleJob, releaseBufferedJobs, renewWorkerLeases } from '../jobs/jobs.repository.js';
 import pool from '../db/connection.js';
 
 // worker id
@@ -30,8 +30,31 @@ process.on("SIGTERM", () => {
 const worker: () => Promise<void> = async () => {
 
     let buffer: Job[] = [];
+    let leaseTimer: ReturnType<typeof setInterval> | undefined;
+    let leaseRenewalInProgress: Promise<void> | null = null;
 
     try {
+
+        const leaseTimeout = Number(process.env.JOB_LEASE_TIMEOUT_MS);
+        if (!Number.isFinite(leaseTimeout) || leaseTimeout <= 0) {
+            throw new Error("JOB_LEASE_TIMEOUT_MS must be a positive number");
+        }
+
+        const leaseRenewInterval = Math.floor(leaseTimeout / 3);
+
+        leaseTimer = setInterval(() => {
+            if (leaseRenewalInProgress) return;
+
+            leaseRenewalInProgress = renewWorkerLeases(workerId)
+                .catch(error => {
+                    console.error(`[${workerId}] Failed to renew job leases`, error)
+                })
+                .finally(() => {
+                    leaseRenewalInProgress = null;
+                });
+        }, leaseRenewInterval)
+
+
         // prefetching jobs into buffer
         buffer = await prefetchJobs(workerId);
 
@@ -121,6 +144,12 @@ const worker: () => Promise<void> = async () => {
                 buffer = [];
             }
         } finally {
+            if (leaseTimer) clearInterval(leaseTimer);
+
+            if (leaseRenewalInProgress) {
+                await leaseRenewalInProgress;
+            }
+
             console.log(`[${workerId}] Closing database pool...`);
             await pool.end();
             console.log(`[${workerId}] Shutdown complete.`);
