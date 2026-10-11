@@ -75,7 +75,16 @@ export const updateJob: (job: Job) => Promise<Job> = async (job: Job) => {
          RETURNING *;`
 
     const result = await pool.query(updateQuery, [job.status, job.retry_attempt, job.started_at, job.completed_at, job.id, job.worker_id]);
-    return result.rows[0];
+    const updatedJob = result.rows[0];
+
+    if (!updatedJob) {
+        throw new Error(
+            `UPDATE returned no row for job ${job.id}. ` +
+            `Expected status=PROCESSING and worker_id=${job.worker_id}`
+        );
+    }
+
+    return updatedJob;
 }
 
 export const recoverStaleJob: () => Promise<Job[]> = async () => {
@@ -93,6 +102,29 @@ export const recoverStaleJob: () => Promise<Job[]> = async () => {
          RETURNING *;`
 
     const result = await pool.query(query, [timeout]);
+
+    return result.rows;
+}
+
+export const releaseBufferedJobs = async (workerId: string, jobIds: string[]): Promise<Job[]> => {
+    if (jobIds.length === 0) return [];
+
+    const query =
+        `UPDATE jobs
+         SET
+            status='QUEUED',
+            worker_id=null,
+            claimed_at=null,
+            started_at=null,
+            completed_at=null,
+            updated_at=now()
+        WHERE
+            id=ANY($1::uuid[])
+            AND status='PROCESSING'
+            AND worker_id=$2
+        RETURNING *;`
+
+    const result = await pool.query(query, [jobIds, workerId]);
 
     return result.rows;
 }
