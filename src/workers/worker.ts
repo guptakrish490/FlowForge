@@ -54,6 +54,7 @@ const worker: () => Promise<void> = async () => {
                         error
                     );
 
+                    leaseRenewalFailed = true;
                     isShuttingDown = true;
                 })
                 .finally(() => {

@@ -100,7 +100,7 @@ export const recoverStaleJob: () => Promise<Job[]> = async () => {
             retry_attempt=retry_attempt+1,
 
             status=CASE
-                WHEN retry_attempt+1<max_retries
+                WHEN retry_attempt+1<=max_retries
                 THEN 'QUEUED'
                 ELSE 'FAILED'
             END,
