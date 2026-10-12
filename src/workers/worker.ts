@@ -32,6 +32,7 @@ const worker: () => Promise<void> = async () => {
     let buffer: Job[] = [];
     let leaseTimer: ReturnType<typeof setInterval> | undefined;
     let leaseRenewalInProgress: Promise<void> | null = null;
+    let leaseRenewalFailed = false;
 
     try {
 
@@ -41,13 +42,19 @@ const worker: () => Promise<void> = async () => {
         }
 
         const leaseRenewInterval = Math.floor(leaseTimeout / 3);
-
         leaseTimer = setInterval(() => {
-            if (leaseRenewalInProgress) return;
+            if (leaseRenewalInProgress || leaseRenewalFailed) return;
 
             leaseRenewalInProgress = renewWorkerLeases(workerId)
                 .catch(error => {
-                    console.error(`[${workerId}] Failed to renew job leases`, error)
+                    console.error(
+                        `[${workerId}] Lease renewal failed.` +
+                        `Stopping this worker to avoid continuinng` +
+                        `with unceratin job ownership.`,
+                        error
+                    );
+
+                    isShuttingDown = true;
                 })
                 .finally(() => {
                     leaseRenewalInProgress = null;
@@ -70,7 +77,13 @@ const worker: () => Promise<void> = async () => {
 
             if (now - lastRecovery >= recoveryInterval) {
                 // recover jobs that becomes stale
-                await recoverStaleJob();
+                const recoveredJobs = await recoverStaleJob();
+
+                if (recoveredJobs.length > 0) {
+                    console.warn(`[${workerId}] Recovered ${recoveredJobs.length} stale jobs: `,
+                        recoveredJobs.map(job => job.id)
+                    );
+                }
                 lastRecovery = now;
             }
 

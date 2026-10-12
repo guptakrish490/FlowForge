@@ -90,15 +90,31 @@ export const updateJob: (job: Job) => Promise<Job> = async (job: Job) => {
 export const recoverStaleJob: () => Promise<Job[]> = async () => {
     const timeout = Number(process.env.JOB_LEASE_TIMEOUT_MS);
 
+    if (!Number.isFinite(timeout) || timeout <= 0) {
+        throw new Error("JOB_LEASE_TIMEOUT_MS must be a positive number");
+    }
+
     const query =
         `UPDATE jobs
-         SET status='QUEUED', claimed_at=null, worker_id=null, updated_at=NOW()
-         WHERE 
-            status='PROCESSING' 
-            AND 
-            worker_id IS NOT NULL
-            AND
-            claimed_at < NOW() - ($1 * INTERVAL '1 millisecond')
+         SET
+            retry_attempt=retry_attempt+1,
+
+            status=CASE
+                WHEN retry_attempt+1<max_retries
+                THEN 'QUEUED'
+                ELSE 'FAILED'
+            END,
+
+            worker_id=null,
+            claimed_at=null,
+            started_at=null,
+            completed_at=null,
+            updated_at=now()
+
+            WHERE
+                status='PROCESSING'
+                AND worker_id IS NOT NULL
+                AND claimed_at<NOW()-($1 * INTERVAL '1 millisecond')
          RETURNING *;`
 
     const result = await pool.query(query, [timeout]);
