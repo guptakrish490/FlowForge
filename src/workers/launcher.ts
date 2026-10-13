@@ -4,6 +4,11 @@ dotenv.config({ quiet: true });
 import { fork } from 'child_process';
 
 const workerCount = Number(process.env.WORKER_COUNT);
+
+if (!Number.isInteger(workerCount) || workerCount <= 0) {
+    throw new Error("WORKER_COUNT must be a positive integer");
+}
+
 const startTime = Date.now();
 let completedWorker = 0;
 
