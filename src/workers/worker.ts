@@ -3,7 +3,12 @@ dotenv.config({ quiet: true });
 
 import { prefetchJobs, processJob, wait } from "./worker.processor.js";
 import { Job } from '../jobs/jobs.types.js';
-import { recoverStaleJob, releaseBufferedJobs, renewWorkerLeases } from '../jobs/jobs.repository.js';
+import {
+    handleProcessingError,
+    recoverStaleJob,
+    releaseBufferedJobs,
+    renewWorkerLeases
+} from '../jobs/jobs.repository.js';
 import pool from '../db/connection.js';
 
 // worker id
@@ -128,9 +133,33 @@ const worker: () => Promise<void> = async () => {
                 const result = results[i];
 
                 if (result.status === 'rejected') {
-                    console.error(`[${workerId}] Error processing job ${job.id} : `, result.reason)
-                }
-                else if (!result.value) {
+                    console.error(
+                        `[${workerId}] Error processing job ${job.id}:`,
+                        result.reason
+                    );
+
+                    try {
+                        const updatedJob = await handleProcessingError(
+                            job.id,
+                            workerId
+                        );
+
+                        if (updatedJob.status === 'QUEUED') {
+                            console.log(
+                                `[${workerId}] Job ${job.id} failed during processing, retrying...`
+                            );
+                        } else {
+                            console.log(
+                                `[${workerId}] Job ${job.id} failed during processing permanently.`
+                            );
+                        }
+                    } catch (error) {
+                        console.error(
+                            `[${workerId}] Failed to update errored job ${job.id}:`,
+                            error
+                        );
+                    }
+                } else if (!result.value) {
                     continue;
                 }
                 else {

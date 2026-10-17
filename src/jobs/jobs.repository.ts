@@ -87,6 +87,40 @@ export const updateJob: (job: Job) => Promise<Job> = async (job: Job) => {
     return updatedJob;
 }
 
+export const handleProcessingError = async (jobId: string, workerId: string): Promise<Job> => {
+    const query =
+        `UPDATE jobs
+         SET
+            retry_attempt=retry_attempt+1,
+            status=CASE
+                WHEN retry_attempt+1<=max_retries
+                THEN 'QUEUED'
+                ELSE 'FAILED'
+            END,
+            worker_id=null,
+            claimed_at=null,
+            started_at=null,
+            completed_at=null,
+            updated_at=NOW()
+         WHERE
+            id=$1
+            AND status='PROCESSING'
+            AND worker_id=$2
+         RETURNING *;`
+
+    const result = await pool.query(query, [jobId, workerId]);
+    const updatedJob = result.rows[0];
+
+    if (!updatedJob) {
+        throw new Error(
+            `PROCESSING error update returned no row for job ${jobId}. ` +
+            `Expected status=PROCESSING and worker_id=${workerId}`
+        );
+    }
+
+    return updatedJob;
+}
+
 export const recoverStaleJob: () => Promise<Job[]> = async () => {
     const timeout = Number(process.env.JOB_LEASE_TIMEOUT_MS);
 
