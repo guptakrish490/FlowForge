@@ -16,6 +16,7 @@ import { startJobsListener } from './jobs.listener.js';
 
 // Worker ID
 const workerId = `worker-${process.argv[2] ?? "unknown"}-${process.pid}-${crypto.randomUUID()}`;
+const workerLabel = `worker-${process.argv[2] ?? "unknown"}`;
 
 // Shutdown state
 let isShuttingDown = false;
@@ -29,7 +30,7 @@ let listenerClient: Awaited<ReturnType<typeof startJobsListener>> | undefined;
 const handleShutDown = (signal: string) => {
     if (isShuttingDown) return;
 
-    console.log(`[${workerId}] Received ${signal}. Starting graceful shutdown...`);
+    console.log(`[${workerLabel}] shutdown (${signal})`);
 
     isShuttingDown = true;
     pendingWakeup = false;
@@ -66,9 +67,7 @@ const worker: () => Promise<void> = async () => {
             leaseRenewalInProgress = renewWorkerLeases(workerId)
                 .catch(error => {
                     console.error(
-                        `[${workerId}] Lease renewal failed. ` +
-                        `Stopping this worker to avoid continuing ` +
-                        `with uncertain job ownership.`,
+                        `[${workerLabel}] lease renewal failed; stopping`,
                         error
                     );
 
@@ -128,9 +127,7 @@ const worker: () => Promise<void> = async () => {
                 const recoveredJobs = await recoverStaleJob();
 
                 if (recoveredJobs.length > 0) {
-                    console.warn(`[${workerId}] Recovered ${recoveredJobs.length} stale jobs:`,
-                        recoveredJobs.map(job => job.id)
-                    );
+                    console.warn(`[${workerLabel}] recovered ${recoveredJobs.length} stale job(s)`);
                 }
 
                 lastRecovery = now;
@@ -163,9 +160,6 @@ const worker: () => Promise<void> = async () => {
                 if (!Number.isFinite(idleTimeout) || idleTimeout <= 0) {
                     throw new Error("IDLE_TIMEOUT_MS must be a positive number");
                 }
-                console.log(
-                    `[${workerId}] No jobs available. Waiting ${idleTimeout/1000} seconds...`
-                );
                 await wait(idleTimeout);
 
                 if (isShuttingDown || leaseRenewalFailed) break;
@@ -175,11 +169,6 @@ const worker: () => Promise<void> = async () => {
                 // End this worker execution if the queue is still empty.
                 // The listener remains active for future notifications.
                 if (buffer.length === 0) {
-                    console.log(
-                        `[${workerId}] Queue is still empty. ` +
-                        `Waiting for jobs...`
-                    );
-
                     continue;
                 }
 
@@ -198,7 +187,7 @@ const worker: () => Promise<void> = async () => {
 
                 if (result.status === 'rejected') {
                     console.error(
-                        `[${workerId}] Error processing job ${job.id}:`,
+                        `[${workerLabel}] process ${job.id} failed:`,
                         result.reason
                     );
 
@@ -210,16 +199,16 @@ const worker: () => Promise<void> = async () => {
 
                         if (updatedJob.status === 'QUEUED') {
                             console.log(
-                                `[${workerId}] Job ${job.id} failed during processing, retrying...`
+                                `[${workerLabel}] retry ${job.id}`
                             );
                         } else {
                             console.log(
-                                `[${workerId}] Job ${job.id} failed during processing permanently.`
+                                `[${workerLabel}] failed ${job.id}`
                             );
                         }
                     } catch (error) {
                         console.error(
-                            `[${workerId}] Failed to update errored job ${job.id}:`,
+                            `[${workerLabel}] error update ${job.id} failed:`,
                             error
                         );
                     }
@@ -227,15 +216,15 @@ const worker: () => Promise<void> = async () => {
                     continue;
                 } else if (result.value.status === 'COMPLETED') {
                     console.log(
-                        `[${workerId}] Job ${job.id} completed.`
+                        `[${workerLabel}] done ${job.id}`
                     );
                 } else if (result.value.status === 'QUEUED') {
                     console.log(
-                        `[${workerId}] Job ${job.id} failed, retrying...`
+                        `[${workerLabel}] retry ${job.id}`
                     );
                 } else {
                     console.log(
-                        `[${workerId}] Job ${job.id} permanently failed.`
+                        `[${workerLabel}] failed ${job.id}`
                     );
                 }
             }
@@ -244,18 +233,12 @@ const worker: () => Promise<void> = async () => {
         // Release jobs that were claimed but never taken from the buffer.
         try {
             if (buffer.length > 0) {
-                console.log(
-                    `[${workerId}] Releasing ${buffer.length} buffered jobs...`
-                );
-
                 const releasedJobs = await releaseBufferedJobs(
                     workerId,
                     buffer.map(job => job.id)
                 );
 
-                console.log(
-                    `[${workerId}] Released ${releasedJobs.length} buffered jobs.`
-                );
+                console.log(`[${workerLabel}] released ${releasedJobs.length} buffered job(s)`);
 
                 buffer = [];
             }
@@ -292,7 +275,7 @@ const startWorker = () => {
     worker()
         .catch(error => {
             console.error(
-                `[${workerId}] Worker stopped with an error:`,
+                `[${workerLabel}] stopped:`,
                 error
             );
         })
@@ -327,7 +310,7 @@ const shutdown = async () => {
         }
     } catch (error) {
         console.error(
-            `[${workerId}] Error closing listener connection:`,
+            `[${workerLabel}] listener close failed:`,
             error
         );
     }
@@ -336,7 +319,7 @@ const shutdown = async () => {
         // The worker must finish before the pool is closed.
         if (workerRunning) {
             console.log(
-                `[${workerId}] Waiting for active worker execution to finish...`
+                `[${workerLabel}] waiting for active jobs`
             );
 
             // The running execution observes isShuttingDown and exits.
@@ -346,11 +329,9 @@ const shutdown = async () => {
             }
         }
     } finally {
-        console.log(`[${workerId}] Closing database pool...`);
-
         await pool.end();
 
-        console.log(`[${workerId}] Shutdown complete.`);
+        console.log(`[${workerLabel}] stopped`);
     }
 };
 
@@ -368,7 +349,7 @@ const main = async () => {
         startWorker();
     } catch (error) {
         console.error(
-            `[${workerId}] Failed to start worker listener:`,
+            `[${workerLabel}] startup failed:`,
             error
         );
 

@@ -16,18 +16,18 @@ let completedWorker = 0;
 for (let i = 1; i <= workerCount; i++) {
     const worker = fork('src/workers/worker.ts', [String(i)]);
 
-    console.log(`Started worker-${i} (PID: ${worker.pid})`);
+    console.log(`[launcher] started worker-${i} (pid ${worker.pid})`);
 
     // process exits if no job found
     worker.on("exit", (code) => {
-        console.log(`Worker-${i} exited with code ${code}`);
+        console.log(`[launcher] worker-${i} exited (${code})`);
         completedWorker++;
 
         if (completedWorker == workerCount) {
             const endTime = Date.now();
 
             const totalTime = (endTime - startTime) / 1000;
-            console.log(`\nTotal completion time: ${totalTime.toFixed(2)} sec`);
+            console.log(`[launcher] total time ${totalTime.toFixed(2)}s`);
         }
     })
 
