@@ -103,6 +103,7 @@ const worker: () => Promise<void> = async () => {
 
                     leaseRenewalFailed = true;
                     isShuttingDown = true;
+                    idleWakeupResolver?.();
                 })
                 .finally(() => {
                     leaseRenewalInProgress = null;
