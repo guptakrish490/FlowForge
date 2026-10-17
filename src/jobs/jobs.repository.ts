@@ -3,17 +3,32 @@ import pool from "../db/connection.js";
 
 export const createJob: (JobData: JobData) => Promise<Job> = async (JobData: JobData) => {
     const { type, workload, max_retries, failure_probability, burst_time_ms } = JobData;
+    const client = await pool.connect();
+    try {
+        await client.query("BEGIN");
 
-    const createJobQuery =
-        `INSERT INTO jobs
-             (type, workload, max_retries, failure_probability, burst_time_ms, started_at, completed_at)
+        const createJobQuery =
+            `INSERT INTO jobs (
+                type, workload, max_retries, failure_probability, burst_time_ms, started_at, completed_at)
              VALUES
-             ($1, $2, $3, $4, $5, $6, $7)
+                ($1, $2, $3, $4, $5, $6, $7)
              RETURNING *`;
 
-    const results = await pool.query(createJobQuery, [type, workload, max_retries, failure_probability, burst_time_ms, null, null]);
-    return results.rows[0];
-}
+        const results = await client.query(createJobQuery, [type, workload, max_retries, failure_probability, burst_time_ms, null, null]);
+
+        await client.query("SELECT pg_notify('jobs_available', '')");
+        await client.query("COMMIT");
+
+        return results.rows[0];
+
+    } catch (error) {
+        await client.query("ROLLBACK");
+        throw error;
+
+    } finally {
+        client.release();
+    }
+};
 
 export const retrieveJobs: () => Promise<Job[]> = async () => {
     const retrieveJobQuery =
@@ -52,6 +67,11 @@ export const getNextQueuedJobs: (worker_id: string) => Promise<Job[]> = async (w
          RETURNING *;`
 
     const bufferSize = Number(process.env.BUFFER_SIZE);
+
+    if (!Number.isInteger(bufferSize) || bufferSize <= 0) {
+        throw new Error("BUFFER_SIZE must be a positive integer");
+    }
+
     const result = await pool.query(query, [worker_id, bufferSize]);
 
     return result.rows;

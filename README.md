@@ -349,6 +349,10 @@ BUFFER_SIZE=60
 BUFFER_THRESHOLD=30
 
 DB_POOL_MAX=2
+
+JOB_LEASE_TIMEOUT_MS=10000
+JOB_RECOVERY_INTERVAL_MS=3000
+IDLE_TIMEOUT_MS=10000
 ```
 
 ### Configuration
@@ -361,6 +365,9 @@ DB_POOL_MAX=2
 | `BUFFER_SIZE` | Jobs claimed into a worker buffer |
 | `BUFFER_THRESHOLD` | Buffer refill threshold |
 | `DB_POOL_MAX` | Maximum PostgreSQL connections per worker process |
+| `JOB_LEASE_TIMEOUT_MS` | Time before a processing job is considered stale |
+| `JOB_RECOVERY_INTERVAL_MS` | Interval for recovering stale jobs |
+| `IDLE_TIMEOUT_MS` | Wait before checking an idle queue again |
 
 ---
 
@@ -372,11 +379,17 @@ Create the database:
 CREATE DATABASE flowforge;
 ```
 
-Then run the migration:
+Run the migrations in order:
 
+```bash
+psql "$DATABASE_URL" -f src/db/migrations/001_create_jobs.sql
+psql "$DATABASE_URL" -f src/db/migrations/002_add_worker_id.sql
+psql "$DATABASE_URL" -f src/db/migrations/003_add_claimed_at.sql
+psql "$DATABASE_URL" -f src/db/migrations/004_add_job_indexes.sql
 ```
-migrations/001_create_jobs.sql
-```
+
+Migration 004 adds partial indexes used by the queue-claim and stale-job
+recovery queries.
 
 ---
 
@@ -609,15 +622,15 @@ This issue was particularly useful because it exposed a real systems constraint 
 
 ### Worker lifecycle
 
-- [ ] Graceful shutdown
-- [ ] Signal handling
-- [ ] Safe worker termination
+- [x] Graceful shutdown
+- [x] Signal handling
+- [x] Safe worker termination
 
 ### Queue efficiency
 
-- [ ] PostgreSQL `LISTEN/NOTIFY`
+- [x] PostgreSQL `LISTEN/NOTIFY`
 - [ ] Reduce unnecessary polling
-- [ ] Event-driven worker wake-up
+- [x] Event-driven worker wake-up
 
 ### Observability
 
@@ -666,14 +679,16 @@ This issue was particularly useful because it exposed a real systems constraint 
 - [x] Atomic job claiming
 - [x] `FOR UPDATE SKIP LOCKED`
 - [x] Configurable database pool size
+- [x] Worker ownership and leases
+- [x] Stale job recovery
+- [x] PostgreSQL `LISTEN/NOTIFY` wake-up
+- [x] Queue and processing indexes
 - [x] Load testing and benchmarking
 
 ### Next
 
-- [ ] Worker ownership
-- [ ] Crash recovery
-- [ ] Graceful shutdown
-- [ ] `LISTEN/NOTIFY`
+- [ ] Listener reconnect handling
+- [ ] Cancellation/fencing after lease loss
 - [ ] Observability
 
 ---

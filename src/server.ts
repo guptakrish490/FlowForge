@@ -8,6 +8,14 @@ const app = Fastify({ logger: false });
 app.register(jobRoutes);
 
 const PORT = Number(process.env.PORT) || 3000;
-app.listen({ port: PORT, host: '0.0.0.0' }, () => {
-  console.log(`Server running at http://localhost:${PORT}`);
-})
+const startServer = async () => {
+  try {
+    await app.listen({ port: PORT, host: '0.0.0.0' });
+    console.log(`Server running at http://localhost:${PORT}`);
+  } catch (error) {
+    app.log.error(error);
+    process.exitCode = 1;
+  }
+};
+
+void startServer();
