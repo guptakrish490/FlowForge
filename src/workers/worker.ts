@@ -22,6 +22,7 @@ const workerLabel = `worker-${process.argv[2] ?? "unknown"}`;
 let isShuttingDown = false;
 let workerRunning = false;
 let pendingWakeup = false;
+let idleWakeupResolver: (() => void) | null = null;
 
 // Listener connection returned by startJobsListener
 let listenerClient: Awaited<ReturnType<typeof startJobsListener>> | undefined;
@@ -34,10 +35,39 @@ const handleShutDown = (signal: string) => {
 
     isShuttingDown = true;
     pendingWakeup = false;
+    idleWakeupResolver?.();
 };
 
 process.on("SIGINT", () => handleShutDown("SIGINT"));
 process.on("SIGTERM", () => handleShutDown("SIGTERM"));
+
+const waitForIdleWakeup = async (timeout: number): Promise<void> => {
+    if (pendingWakeup) {
+        pendingWakeup = false;
+        return;
+    }
+
+    await new Promise<void>(resolve => {
+        let settled = false;
+
+        const finish = () => {
+            if (settled) return;
+
+            settled = true;
+            clearTimeout(timer);
+
+            if (idleWakeupResolver === finish) {
+                idleWakeupResolver = null;
+            }
+
+            pendingWakeup = false;
+            resolve();
+        };
+
+        const timer = setTimeout(finish, timeout);
+        idleWakeupResolver = finish;
+    });
+};
 
 // Worker execution
 const worker: () => Promise<void> = async () => {
@@ -160,7 +190,9 @@ const worker: () => Promise<void> = async () => {
                 if (!Number.isFinite(idleTimeout) || idleTimeout <= 0) {
                     throw new Error("IDLE_TIMEOUT_MS must be a positive number");
                 }
-                await wait(idleTimeout);
+                await waitForIdleWakeup(
+                    Math.min(idleTimeout, recoveryInterval)
+                );
 
                 if (isShuttingDown || leaseRenewalFailed) break;
 
@@ -267,6 +299,7 @@ const startWorker = () => {
     // request another execution after the current one finishes.
     if (workerRunning) {
         pendingWakeup = true;
+        idleWakeupResolver?.();
         return;
     }
 
