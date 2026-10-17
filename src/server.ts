@@ -1,11 +1,13 @@
 import Fastify from "fastify";
 import dotenv from 'dotenv';
 import jobRoutes from "./jobs/jobs.routes.js";
+import healthRoutes from "./health/health.routes.js";
 
 dotenv.config();
 const app = Fastify({ logger: false });
 
 app.register(jobRoutes);
+app.register(healthRoutes);
 
 const PORT = Number(process.env.PORT) || 3000;
 const startServer = async () => {
