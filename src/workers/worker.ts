@@ -6,6 +6,7 @@ import crypto from 'node:crypto';
 import { prefetchJobs, processJob, wait } from "./worker.processor.js";
 import { Job } from '../jobs/jobs.types.js';
 import {
+    handleProcessingError,
     recoverStaleJob,
     releaseBufferedJobs,
     renewWorkerLeases
@@ -200,6 +201,28 @@ const worker: () => Promise<void> = async () => {
                         `[${workerId}] Error processing job ${job.id}:`,
                         result.reason
                     );
+
+                    try {
+                        const updatedJob = await handleProcessingError(
+                            job.id,
+                            workerId
+                        );
+
+                        if (updatedJob.status === 'QUEUED') {
+                            console.log(
+                                `[${workerId}] Job ${job.id} failed during processing, retrying...`
+                            );
+                        } else {
+                            console.log(
+                                `[${workerId}] Job ${job.id} failed during processing permanently.`
+                            );
+                        }
+                    } catch (error) {
+                        console.error(
+                            `[${workerId}] Failed to update errored job ${job.id}:`,
+                            error
+                        );
+                    }
                 } else if (!result.value) {
                     continue;
                 } else if (result.value.status === 'COMPLETED') {
