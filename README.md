@@ -481,10 +481,15 @@ http://localhost:3000
 ## Start Workers
 
 ```bash
-npm run worker
+npm run dev:worker
 ```
 
-The launcher reads `WORKER_COUNT` and starts the configured number of worker processes.
+`npm run dev:worker` starts one worker process directly.
+`npm run dev:launcher` starts the launcher, which reads `WORKER_COUNT` and starts
+the configured number of worker processes.
+
+For a compiled deployment, run `npm run build`, then use `npm run start` and
+either `npm run start:worker` or `npm run start:launcher` in separate processes.
 
 Example:
 
