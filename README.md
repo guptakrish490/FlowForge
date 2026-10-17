@@ -22,7 +22,12 @@ Instead of executing work directly inside an API request, FlowForge stores jobs 
 - Simulated workload durations
 - Configurable worker count and concurrency
 - Configurable PostgreSQL connection pool size
-- Load testing and performance benchmarking
+- PostgreSQL `LISTEN/NOTIFY` worker wake-up
+- Listener reconnect with exponential backoff
+- Polling fallback for queue recovery
+- Lease renewal and stale-job recovery
+- Graceful shutdown with buffered-job release
+- Health check endpoint
 
 ---
 
@@ -34,6 +39,7 @@ flowchart LR
     API["Fastify API"]
     Service["Job Service"]
     DB[("PostgreSQL")]
+    Notify["LISTEN / NOTIFY"]
     
     Launcher["Worker Launcher"]
     W1["Worker 1"]
@@ -43,6 +49,7 @@ flowchart LR
     Client --> API
     API --> Service
     Service --> DB
+    DB -. "jobs_available" .-> Notify
 
     Launcher --> W1
     Launcher --> W2
@@ -51,6 +58,9 @@ flowchart LR
     W1 --> DB
     W2 --> DB
     WN --> DB
+    Notify --> W1
+    Notify --> W2
+    Notify --> WN
 ```
 
 The API is responsible for **creating and reading jobs**.
@@ -58,6 +68,9 @@ The API is responsible for **creating and reading jobs**.
 Workers are responsible for **claiming and processing jobs**.
 
 PostgreSQL acts as the persistent source of truth and coordinates access to queued jobs.
+
+Workers use PostgreSQL notifications as a fast wake-up signal. They still poll the
+queue periodically, so processing does not depend on a notification being delivered.
 
 ---
 
@@ -120,7 +133,7 @@ WORKER_CONCURRENCY=100
 
 This allows multiple worker processes to independently claim jobs while each worker processes several jobs concurrently.
 
-The actual useful concurrency depends on the workload and system/database limits, so FlowForge includes benchmarking to study these effects.
+The actual useful concurrency depends on the workload and system/database limits.
 
 ---
 
@@ -217,6 +230,43 @@ PROCESSING
 
 The current implementation uses simulated failures and execution durations to make retry and workload behavior measurable.
 
+Processor errors are also reconciled through the repository. The worker increments
+`retry_attempt`, requeues the job when retries remain, or marks it `FAILED` when
+the retry limit is reached. Ownership and lease timestamps are cleared in the same
+database update.
+
+---
+
+## Leases, Recovery, and Shutdown
+
+When a worker claims a job, it stores a unique `worker_id` and `claimed_at` timestamp.
+Active workers renew their leases periodically. If a worker crashes or stops renewing,
+another worker can recover stale `PROCESSING` jobs after `JOB_LEASE_TIMEOUT_MS`.
+
+```mermaid
+sequenceDiagram
+    participant W as Worker
+    participant DB as PostgreSQL
+    participant R as Recovery loop
+
+    W->>DB: Claim QUEUED job
+    DB-->>W: PROCESSING + lease
+    loop While processing
+        W->>DB: Renew lease
+    end
+    R->>DB: Find expired claimed_at
+    DB-->>R: Requeue or permanently fail job
+    W-->>DB: Release buffered jobs on shutdown
+```
+
+On `SIGINT` or `SIGTERM`, the worker stops claiming new work, releases jobs that
+are still in its local buffer, closes the notification listener, and then closes
+its database pool. A currently running processor is allowed to finish or be
+recovered later if its lease expires.
+
+If the notification connection drops, the listener reconnects with exponential
+backoff. The worker's recovery/queue loop remains active as a polling fallback.
+
 ---
 
 ## 🗄️ Database Schema
@@ -237,11 +287,14 @@ The main table is `jobs`.
 | `updated_at` | TIMESTAMPTZ | Last update timestamp |
 | `started_at` | TIMESTAMPTZ | Processing start time |
 | `completed_at` | TIMESTAMPTZ | Completion time |
+| `worker_id` | VARCHAR(100) | Current worker owner |
+| `claimed_at` | TIMESTAMPTZ | Lease timestamp |
 
-An index is maintained on:
+Partial indexes are maintained on:
 
 ```sql
-(status, created_at)
+jobs (created_at) WHERE status = 'QUEUED'
+jobs (claimed_at) WHERE status = 'PROCESSING'
 ```
 
 to support queued-job retrieval.
@@ -283,6 +336,20 @@ FlowForge/
 ├── LICENSE
 ├── package-lock.json
 └── tsconfig.json
+```
+
+The repository also includes migrations `002_add_worker_id.sql`,
+`003_add_claimed_at.sql`, and `004_add_job_indexes.sql`, plus the health route
+and PostgreSQL notification listener shown in the source tree.
+
+Additional source paths:
+
+```text
+src/health/health.routes.ts
+src/workers/jobs.listener.ts
+src/workers/worker.ts
+src/workers/worker.processor.ts
+src/workers/launcher.ts
 ```
 
 ### Responsibilities
@@ -439,6 +506,15 @@ Worker-5
 
 # 📡 API
 
+## Health Check
+
+```http
+GET /health
+```
+
+The endpoint checks PostgreSQL with `SELECT 1`. It returns `200` when the API
+and database are available, and `503` when the database is unavailable.
+
 ## Create Job
 
 ```http
@@ -480,6 +556,8 @@ Returns a specific job.
 
 # 📊 Performance
 
+<!-- Benchmark results are intentionally omitted until they are reproducible. -->
+<!--
 FlowForge has been tested with a **5,000-job workload** to study the effect of worker count, concurrency, and buffer size.
 
 > These are local experimental measurements using simulated workloads. They are not production benchmarks.
@@ -564,6 +642,7 @@ Approximate measured throughput:
 ```
 
 These measurements describe the tested workload and environment; they are not intended as a universal performance limit.
+-->
 
 ---
 
@@ -581,6 +660,7 @@ The project therefore treats worker count, concurrency, and buffer size as **tun
 
 # 🧪 Engineering Issue Discovered During Testing
 
+<!-- Engineering benchmark notes are intentionally omitted until they are reproducible.
 High worker counts initially caused PostgreSQL connection exhaustion.
 
 Each Node.js worker process creates its own `pg.Pool`.
@@ -607,6 +687,7 @@ DB_POOL_MAX=2
 This allows worker scaling experiments without unnecessarily creating large numbers of database connections.
 
 This issue was particularly useful because it exposed a real systems constraint that wasn't obvious from the application-level code.
+-->
 
 ---
 
@@ -614,11 +695,11 @@ This issue was particularly useful because it exposed a real systems constraint 
 
 ### Reliability
 
-- [ ] Add `worker_id` to jobs
-- [ ] Detect stale `PROCESSING` jobs
-- [ ] Implement crash recovery
-- [ ] Add job ownership / leases
-- [ ] Define retry behavior for crashed workers
+- [x] Add `worker_id` to jobs
+- [x] Detect stale `PROCESSING` jobs
+- [x] Implement crash recovery
+- [x] Add job ownership / leases
+- [x] Define retry behavior for crashed workers
 
 ### Worker lifecycle
 
@@ -629,8 +710,9 @@ This issue was particularly useful because it exposed a real systems constraint 
 ### Queue efficiency
 
 - [x] PostgreSQL `LISTEN/NOTIFY`
-- [ ] Reduce unnecessary polling
+- [x] Reduce unnecessary polling with notification wake-up
 - [x] Event-driven worker wake-up
+- [x] Listener reconnect with backoff
 
 ### Observability
 
@@ -646,8 +728,8 @@ This issue was particularly useful because it exposed a real systems constraint 
 - [ ] Dead-letter queue
 - [ ] Retry backoff
 - [ ] Idempotency
-- [ ] Heartbeats
-- [ ] Better failure recovery
+- [x] Lease heartbeats
+- [x] Processor-error recovery
 
 ### Benchmarking
 
@@ -667,6 +749,7 @@ This issue was particularly useful because it exposed a real systems constraint 
 ### Implemented
 
 - [x] Fastify API
+- [x] `/health` database health check
 - [x] PostgreSQL persistence
 - [x] Job creation and retrieval
 - [x] Job lifecycle
@@ -683,13 +766,13 @@ This issue was particularly useful because it exposed a real systems constraint 
 - [x] Stale job recovery
 - [x] PostgreSQL `LISTEN/NOTIFY` wake-up
 - [x] Queue and processing indexes
-- [x] Load testing and benchmarking
+- [x] Listener reconnect with polling fallback
 
 ### Next
 
-- [ ] Listener reconnect handling
 - [ ] Cancellation/fencing after lease loss
-- [ ] Observability
+- [ ] Structured observability and metrics
+- [ ] Automated integration tests
 
 ---
 
