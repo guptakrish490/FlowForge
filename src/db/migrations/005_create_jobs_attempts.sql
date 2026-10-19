@@ -4,7 +4,7 @@ CREATE TABLE
         job_id UUID NOT NULL REFERENCES jobs (id),
         attempt_number INTEGER NOT NULL CHECK (attempt_number >= 1),
         started_at TIMESTAMPTZ NOT NULL,
-        finished_at TIMESTAMPT,
+        finished_at TIMESTAMPTZ,
         outcome VARCHAR(30) CHECK (
             outcome IN (
                 'SUCCEEDED',

@@ -107,6 +107,76 @@ export const updateJob: (job: Job) => Promise<Job> = async (job: Job) => {
     return updatedJob;
 }
 
+export const updateJobWithAttempt = async (
+    job: Job,
+    attemptNumber: number,
+    start: Date,
+    finish: Date,
+    outcome: 'SUCCEEDED' | 'RETRYABLE_FAILURE' | 'TERMINAL_FAILURE'
+): Promise<Job> => {
+    const client = await pool.connect();
+
+    try {
+        await client.query("BEGIN");
+
+        const updateQuery =
+            `UPDATE jobs
+             SET
+                status=$1,
+                retry_attempt=$2,
+                started_at=$3,
+                completed_at=$4,
+                worker_id=null,
+                claimed_at=null,
+                updated_at=NOW()
+             WHERE
+                id=$5
+                AND status='PROCESSING'
+                AND worker_id=$6
+             RETURNING *;`;
+
+        const updateResult = await client.query(updateQuery, [
+            job.status,
+            job.retry_attempt,
+            job.started_at,
+            job.completed_at,
+            job.id,
+            job.worker_id
+        ]);
+        const updatedJob = updateResult.rows[0];
+
+        if (!updatedJob) {
+            throw new Error(
+                `UPDATE returned no row for job ${job.id}. ` +
+                `Expected status=PROCESSING and worker_id=${job.worker_id}`
+            );
+        }
+
+        const attemptQuery =
+            `INSERT INTO jobs_attempts
+                (job_id, attempt_number, started_at, finished_at, outcome)
+             VALUES
+                ($1, $2, $3, $4, $5);`;
+
+        await client.query(attemptQuery, [
+            job.id,
+            attemptNumber,
+            start,
+            finish,
+            outcome
+        ]);
+
+        await client.query("COMMIT");
+
+        return updatedJob;
+    } catch (error) {
+        await client.query("ROLLBACK");
+        throw error;
+    } finally {
+        client.release();
+    }
+}
+
 export const handleProcessingError = async (jobId: string, workerId: string): Promise<Job> => {
     const query =
         `UPDATE jobs

@@ -1,6 +1,5 @@
-import { getNextQueuedJobs, updateJob } from "../jobs/jobs.repository.js";
+import { getNextQueuedJobs, updateJobWithAttempt } from "../jobs/jobs.repository.js";
 import { Job } from "../jobs/jobs.types.js";
-import { storeJobAttempt } from "../metrics/metrics.repository.js";
 
 export const wait = async (ms: number) => {
     return new Promise(resolve => setTimeout(resolve, ms));
@@ -52,11 +51,14 @@ export const processJob: (job: Job) => Promise<Job> = async (job: Job) => {
     // Clear the lease before persisting the new job state.
     job.claimed_at = null;
 
-    // Persist the job state before storing the attempt record.
-    const updatedJob = await updateJob(job);
-
-    // Store this attempt for historical metrics.
-    await storeJobAttempt(job.id, attempt_number, start, finish, outcome);
+    // Persist the job and attempt together as one transaction.
+    const updatedJob = await updateJobWithAttempt(
+        job,
+        attempt_number,
+        start,
+        finish,
+        outcome
+    );
 
     // return updated job
     return updatedJob;
