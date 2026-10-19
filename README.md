@@ -1,156 +1,165 @@
 # FlowForge
 
-> A PostgreSQL-backed asynchronous job processing system built with TypeScript, Fastify, and Node.js.
+### A PostgreSQL-backed job queue built to explore concurrency, recovery, and throughput
 
-FlowForge is a backend systems project focused on **concurrent job processing, multiple workers, database-level job claiming, buffering, retries, and performance experimentation**.
+FlowForge is a backend systems project that accepts asynchronous jobs, stores them in PostgreSQL, and processes them through configurable worker processes.
 
-Instead of executing work directly inside an API request, FlowForge stores jobs in PostgreSQL and lets independent worker processes consume and process them asynchronously.
+The project explores what happens when a queue must handle concurrent workers, retries, worker interruptions, database coordination, and performance measurement.
 
----
+> **Project focus:** Persistent job queue · Concurrent workers · Failure recovery · Observability
+> **Stack:** TypeScript · Node.js · Fastify · PostgreSQL · `pg`
 
-## ✨ Features
-
-- REST API for creating and retrieving jobs
-- PostgreSQL-backed job queue
-- Multiple independent worker processes
-- Concurrent job processing inside each worker
-- Local in-memory job buffering
-- Atomic job claiming using PostgreSQL
-- `FOR UPDATE SKIP LOCKED` for worker coordination
-- Configurable retry attempts
-- Configurable failure probability
-- Simulated workload durations
-- Configurable worker count and concurrency
-- Configurable PostgreSQL connection pool size
-- PostgreSQL `LISTEN/NOTIFY` worker wake-up
-- Listener reconnect with exponential backoff
-- Polling fallback for queue recovery
-- Lease renewal and stale-job recovery
-- Graceful shutdown with buffered-job release
-- Health check endpoint
+FlowForge is an educational implementation—not a drop-in replacement for a mature production queue service. Its value is in the engineering concepts demonstrated: durable queue state, worker coordination, retries, recovery, and observability.
 
 ---
 
-## 🏗️ Architecture
+## Contents
+
+* [What FlowForge does](#what-flowforge-does)
+* [Architecture](#architecture)
+* [Job lifecycle](#job-lifecycle)
+* [Worker coordination](#worker-coordination)
+* [Reliability and recovery](#reliability-and-recovery)
+* [Metrics and observability](#metrics-and-observability)
+* [Worker processing benchmark](#worker-processing-benchmark)
+* [Tech stack and project structure](#tech-stack-and-project-structure)
+* [Run locally](#run-locally)
+* [HTTP API](#http-api)
+* [Database model](#database-model)
+* [Design decisions](#design-decisions)
+* [Current scope and limitations](#current-scope-and-limitations)
+
+---
+
+## What FlowForge does
+
+FlowForge provides a persistent queue and a separate worker layer.
+
+* Accepts jobs through a Fastify API.
+* Stores job state in PostgreSQL.
+* Lets multiple worker processes claim queued jobs concurrently.
+* Processes a configurable number of jobs at a time inside each worker.
+* Buffers claimed jobs locally to reduce repeated queue-fetch queries.
+* Simulates workload duration and probabilistic failures to exercise retry behavior.
+* Uses PostgreSQL notifications to wake workers, with polling as a fallback.
+* Tracks worker ownership through leases and recovers stale `PROCESSING` jobs.
+* Releases jobs remaining in a worker's local buffer during graceful shutdown.
+* Records normal completed processing attempts and exposes queue and historical metrics.
+* Supports configurable worker count, concurrency, buffer size, and database pool size.
+
+### At a glance
 
 ```mermaid
 flowchart LR
-    Client["Client / Postman"]
-    API["Fastify API"]
-    Service["Job Service"]
-    DB[("PostgreSQL")]
-    Notify["LISTEN / NOTIFY"]
-    
-    Launcher["Worker Launcher"]
-    W1["Worker 1"]
-    W2["Worker 2"]
-    WN["Worker N"]
-
-    Client --> API
-    API --> Service
-    Service --> DB
-    DB -. "jobs_available" .-> Notify
-
-    Launcher --> W1
-    Launcher --> W2
-    Launcher --> WN
-
-    W1 --> DB
-    W2 --> DB
-    WN --> DB
-    Notify --> W1
-    Notify --> W2
-    Notify --> WN
+    Client["Client / load generator"] --> API["Fastify API"]
+    API -->|Create job| DB[("PostgreSQL")]
+    DB -. "jobs_available notification" .-> Listener["Worker listener"]
+    DB -->|Claim queued jobs| Workers["Worker processes"]
+    Listener --> Workers
+    Workers -->|Persist state and attempt| DB
+    API -->|GET /metrics| Metrics["Metrics endpoint"]
+    Metrics --> DB
 ```
 
-The API is responsible for **creating and reading jobs**.
-
-Workers are responsible for **claiming and processing jobs**.
-
-PostgreSQL acts as the persistent source of truth and coordinates access to queued jobs.
-
-Workers use PostgreSQL notifications as a fast wake-up signal. They still poll the
-queue periodically, so processing does not depend on a notification being delivered.
+PostgreSQL is the durable source of truth. Notifications are wake-up signals; workers still query PostgreSQL to claim jobs.
 
 ---
 
-## 🔄 Job Processing Flow
+## Architecture
 
-```mermaid
-flowchart TD
-    A["POST /jobs"] --> B["Create job"]
-    B --> C["QUEUED"]
+### Main components
 
-    C --> D["Worker claims job"]
-    D --> E["PROCESSING"]
+| Component           | Responsibility                                                                                                           |
+| ------------------- | ------------------------------------------------------------------------------------------------------------------------ |
+| **Fastify API**     | Validates HTTP requests and exposes job, health, and metrics endpoints.                                                  |
+| **Job service**     | Applies workload configuration and coordinates job creation/retrieval.                                                   |
+| **Job repository**  | Reads and writes job records; claims queued jobs and manages ownership, leases, and recovery.                            |
+| **PostgreSQL**      | Stores job state and attempt history; coordinates competing workers.                                                     |
+| **Worker launcher** | Starts the configured number of worker child processes.                                                                  |
+| **Worker process**  | Maintains a notification listener, claims batches, schedules concurrent processing, renews leases, and handles shutdown. |
+| **Job processor**   | Simulates execution and success/failure, then persists the resulting job state and attempt record.                       |
+| **Metrics module**  | Queries current queue state and historical timestamps, then calculates metrics.                                          |
 
-    E --> F{"Execution succeeds?"}
-
-    F -->|Yes| G["COMPLETED"]
-    F -->|No| H{"Retries remaining?"}
-
-    H -->|Yes| C
-    H -->|No| I["FAILED"]
-```
-
-Each job contains information such as:
-
-- workload
-- maximum retries
-- failure probability
-- simulated execution time
-- current status
-- retry attempt
-
----
-
-## ⚙️ Concurrency Model
-
-FlowForge supports concurrency at two levels:
-
-1. **Multiple worker processes**
-2. **Multiple jobs processed concurrently inside each worker**
+### Process and data flow
 
 ```mermaid
 flowchart TB
-    DB[("PostgreSQL")]
+    subgraph API["API process"]
+        R["Routes"] --> C["Controllers"] --> S["Services"] --> JR["Job repository"]
+    end
 
-    DB --> W1["Worker 1"]
-    DB --> W2["Worker 2"]
-    DB --> W3["Worker N"]
+    subgraph PG["PostgreSQL"]
+        J[("jobs")]
+        A[("jobs_attempts")]
+        N["NOTIFY: jobs_available"]
+    end
 
-    W1 --> C1["Concurrent jobs"]
-    W2 --> C2["Concurrent jobs"]
-    W3 --> C3["Concurrent jobs"]
+    subgraph Launcher["Worker launcher"]
+        L["Launcher"] --> W1["Worker process 1"]
+        L --> W2["Worker process 2"]
+        L --> WN["Worker process N"]
+    end
+
+    JR --> J
+    JR --> N
+    W1 -->|Claim / renew / update| J
+    W2 -->|Claim / renew / update| J
+    WN -->|Claim / renew / update| J
+    W1 --> A
+    W2 --> A
+    WN --> A
+    N -.-> W1
+    N -.-> W2
+    N -.-> WN
 ```
 
-For example:
-
-```
-WORKER_COUNT=10
-WORKER_CONCURRENCY=100
-```
-
-This allows multiple worker processes to independently claim jobs while each worker processes several jobs concurrently.
-
-The actual useful concurrency depends on the workload and system/database limits.
+Workers are separate Node.js processes. Each worker has its own database pool and notification connection. Pool size therefore matters across the deployment: the potential connection count grows with the number of worker processes.
 
 ---
 
-## 🔒 Safe Job Claiming
+## Job lifecycle
 
-Multiple workers must not process the same job.
+A job moves through four stored states:
 
-FlowForge uses PostgreSQL row-level locking with:
+* `QUEUED` — available for a worker to claim.
+* `PROCESSING` — claimed by a worker and in progress or waiting in its local buffer.
+* `COMPLETED` — processing succeeded.
+* `FAILED` — retries were exhausted or the job was otherwise marked terminal.
 
-```sql
-FOR UPDATE SKIP LOCKED
+### Normal processing and retries
+
+```mermaid
+stateDiagram-v2
+    [*] --> QUEUED: Job created
+    QUEUED --> PROCESSING: Worker claims job
+    PROCESSING --> COMPLETED: Attempt succeeds
+    PROCESSING --> QUEUED: Attempt fails, retries remain
+    PROCESSING --> FAILED: Attempt fails, no retries remain
+    QUEUED --> PROCESSING: Retry claimed
 ```
 
-The worker claims queued jobs atomically:
+FlowForge uses simulated workloads. Workload configuration determines execution duration, retry allowance, and failure probability. This makes it possible to exercise queue mechanics without depending on an external email service, API, or other side effect.
+
+### Job versus attempt
+
+A **job** is the unit stored in the queue. An **attempt** is one execution of that job.
+
+For example, a job that fails twice and succeeds on its third execution has one job record and three executions. Its normal processor outcomes are two retryable failures followed by one success.
+
+The `jobs_attempts` table stores attempt number, start and finish timestamps, and outcome. The normal processor path persists the job transition and attempt history in one database transaction.
+
+---
+
+## Worker coordination
+
+### 1. Atomic job claiming
+
+Workers claim a batch from PostgreSQL using `FOR UPDATE SKIP LOCKED`. Selected rows are changed from `QUEUED` to `PROCESSING` and assigned to a worker.
+
+Simplified illustration:
 
 ```sql
-WITH jobs_to_claim AS (
+WITH candidates AS (
     SELECT id
     FROM jobs
     WHERE status = 'QUEUED'
@@ -159,255 +168,254 @@ WITH jobs_to_claim AS (
     LIMIT $1
 )
 UPDATE jobs
-SET
-    status = 'PROCESSING',
-    started_at = NOW(),
+SET status = 'PROCESSING',
+    worker_id = $2,
+    claimed_at = NOW(),
     updated_at = NOW()
-WHERE id IN (
-    SELECT id
-    FROM jobs_to_claim
-)
+WHERE id IN (SELECT id FROM candidates)
 RETURNING *;
 ```
 
-This allows multiple workers to safely compete for queued jobs without processing the same row simultaneously.
+The repository uses an atomic update with a locked subquery. This lets workers compete for queued jobs without waiting on rows already locked by another claimant.
 
----
+### 2. Local buffering
 
-## 🧠 Buffering
-
-Workers claim jobs in batches instead of querying PostgreSQL for every individual job.
+Each worker claims jobs in batches and keeps them in an in-memory buffer.
 
 ```mermaid
 flowchart LR
-    DB[("PostgreSQL")]
-    Claim["Claim batch"]
-    Buffer["Worker Buffer"]
-    Process["Concurrent Processing"]
-    Update["Update job state"]
-
-    DB --> Claim --> Buffer --> Process --> Update --> DB
+    Q[("PostgreSQL queue")] -->|Claim batch| B["Worker buffer"]
+    B -->|Take up to concurrency limit| P["Concurrent processors"]
+    P -->|Persist outcome| Q
+    B -. "Buffer reaches refill threshold" .-> Q
 ```
 
-The buffer is refilled when it reaches a configured threshold.
+Batching reduces the frequency of claim queries. It also means a job can be in `PROCESSING` because it has been claimed and buffered, even if its execution has not started yet.
 
-Configuration:
+A larger buffer can reduce database overhead, but it also reserves more jobs in a worker before they begin execution. Buffer size and refill threshold are configurable.
 
-```
-BUFFER_SIZE=60
-BUFFER_THRESHOLD=30
-```
+### 3. Concurrency
 
-This reduces unnecessary database fetches while keeping a local supply of work available to the worker.
+Two controls shape processing capacity:
+
+* **Worker count:** number of worker processes.
+* **Worker concurrency:** maximum number of jobs scheduled together by each worker.
+
+Configured concurrency is:
+
+`worker count × concurrency per worker`
+
+This is a configured ceiling, not a guarantee that all slots are busy. Actual throughput depends on job duration, CPU and memory, database capacity, buffer behavior, and the workload.
+
+### 4. Notifications plus polling
+
+When a job is created, the API sends a PostgreSQL `NOTIFY` on `jobs_available`. Workers listen for the notification and wake up to check the queue.
+
+Notifications do not contain the job itself and are not treated as durable queue entries. Workers claim jobs from the `jobs` table. Polling and recovery checks provide a fallback if a notification is missed or the listener reconnects.
 
 ---
 
-## 🔁 Retry Handling
+## Reliability and recovery
 
-Jobs can fail based on their configured `failure_probability`.
+FlowForge includes mechanisms intended to make worker interruptions recoverable.
 
-If a job fails and still has retries available, it returns to the queue:
+### Ownership and leases
 
-```
-PROCESSING
-    ↓
-   FAIL
-    ↓
-retries remaining?
-    ↓
-   QUEUED
-```
+When a worker claims a job, the row receives a `worker_id` and `claimed_at` timestamp. Updates to a processing job check that it is still `PROCESSING` and owned by that worker.
 
-If no retries remain:
-
-```
-PROCESSING
-    ↓
-   FAIL
-    ↓
- FAILED
-```
-
-The current implementation uses simulated failures and execution durations to make retry and workload behavior measurable.
-
-Processor errors are also reconciled through the repository. The worker increments
-`retry_attempt`, requeues the job when retries remain, or marks it `FAILED` when
-the retry limit is reached. Ownership and lease timestamps are cleared in the same
-database update.
-
----
-
-## Leases, Recovery, and Shutdown
-
-When a worker claims a job, it stores a unique `worker_id` and `claimed_at` timestamp.
-Active workers renew their leases periodically. If a worker crashes or stops renewing,
-another worker can recover stale `PROCESSING` jobs after `JOB_LEASE_TIMEOUT_MS`.
+Workers periodically renew leases. If a processing job's lease becomes stale, recovery can requeue it when retries remain or mark it failed when retry allowance is exhausted.
 
 ```mermaid
 sequenceDiagram
     participant W as Worker
     participant DB as PostgreSQL
-    participant R as Recovery loop
+    participant REC as Recovery check
 
-    W->>DB: Claim QUEUED job
-    DB-->>W: PROCESSING + lease
-    loop While processing
-        W->>DB: Renew lease
+    W->>DB: Claim job (owner + lease)
+    DB-->>W: Claimed job
+    loop While worker is active
+        W->>DB: Renew claimed_at
     end
-    R->>DB: Find expired claimed_at
-    DB-->>R: Requeue or permanently fail job
-    W-->>DB: Release buffered jobs on shutdown
+    REC->>DB: Find expired processing leases
+    DB-->>REC: Stale jobs
+    REC->>DB: Requeue or mark terminal failure
 ```
 
-On `SIGINT` or `SIGTERM`, the worker stops claiming new work, releases jobs that
-are still in its local buffer, closes the notification listener, and then closes
-its database pool. A currently running processor is allowed to finish or be
-recovered later if its lease expires.
+### Graceful shutdown
 
-If the notification connection drops, the listener reconnects with exponential
-backoff. The worker's recovery/queue loop remains active as a polling fallback.
+On `SIGINT` or `SIGTERM`, a worker begins shutting down, stops taking additional work, releases jobs still waiting in its local buffer, closes its notification listener, and closes its database pool after the active worker execution settles.
+
+### Listener reconnection
+
+The PostgreSQL listener reconnects after connection errors or disconnection using exponential backoff. The worker loop also polls, so wake-up does not depend exclusively on a continuously healthy notification connection.
+
+### Delivery guarantee
+
+FlowForge is designed around recoverable database state, but it does **not** guarantee exactly-once execution. A worker can perform work and then crash before persisting its result; stale-job recovery may cause the job to run again.
+
+For real jobs with external side effects, idempotency or other duplicate-effect protection would be needed. The current simulated workload avoids that external-side-effect problem.
 
 ---
 
-## 🗄️ Database Schema
+## Metrics and observability
 
-The main table is `jobs`.
+The metrics endpoint is:
 
-| Column | Type | Description |
-|---|---|---|
-| `id` | UUID | Unique job ID |
-| `type` | VARCHAR(50) | Job type |
-| `workload` | VARCHAR(10) | `LOW`, `MEDIUM`, or `HIGH` |
-| `max_retries` | INTEGER | Maximum retry attempts |
-| `failure_probability` | REAL | Simulated failure probability |
-| `burst_time_ms` | INTEGER | Simulated execution duration |
-| `status` | VARCHAR(20) | Current job state |
-| `retry_attempt` | INTEGER | Current retry count |
-| `created_at` | TIMESTAMPTZ | Creation timestamp |
-| `updated_at` | TIMESTAMPTZ | Last update timestamp |
-| `started_at` | TIMESTAMPTZ | Processing start time |
-| `completed_at` | TIMESTAMPTZ | Completion time |
-| `worker_id` | VARCHAR(100) | Current worker owner |
-| `claimed_at` | TIMESTAMPTZ | Lease timestamp |
-
-Partial indexes are maintained on:
-
-```sql
-jobs (created_at) WHERE status = 'QUEUED'
-jobs (claimed_at) WHERE status = 'PROCESSING'
+```http
+GET /metrics
+GET /metrics?window=5m
 ```
 
-to support queued-job retrieval.
+The `window` parameter accepts a positive number of minutes followed by `m`, such as `1m`, `5m`, or `15m`. If omitted, the controller defaults to `1m`.
+
+The endpoint combines **current state snapshots** with **historical measurements over the selected window**.
+
+### Metric definitions
+
+| Metric                                                                | Meaning in the implementation                                                                                                                         |
+| --------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `workerCount`                                                         | Configured worker-process count from environment settings.                                                                                            |
+| `concurrency`                                                         | Configured concurrency per worker, not a live count of occupied slots.                                                                                |
+| `queueSize`                                                           | Current number of jobs in `QUEUED` state.                                                                                                             |
+| `currentlyProcessing`                                                 | Current number of jobs in `PROCESSING` state, including jobs claimed into buffers.                                                                    |
+| `completedJobs`                                                       | Successful attempt outcomes recorded in the selected time window.                                                                                     |
+| `retryableFailures`                                                   | Retryable attempt outcomes recorded in the window; a job can contribute more than one.                                                                |
+| `terminalFailures`                                                    | Terminal-failure attempt outcomes recorded in the window.                                                                                             |
+| `avgProcessingTimeMs`                                                 | Average `finished_at - started_at` duration for attempts finished in the window.                                                                      |
+| `avgCompletionTimeMs`                                                 | Average `completed_at - created_at` duration for successful jobs completed in the window.                                                             |
+| `avgQueueWaitMs`                                                      | Currently calculated from job creation to attempt start for attempts finished in the window. For retries, this includes time since original creation. |
+| `throughputJobsPerMinute` / `throughputJobsPerSecond`                 | Distinct jobs with successful or terminal-failure outcomes divided by the entire selected window.                                                     |
+| `observedThroughputJobsPerMinute` / `observedThroughputJobsPerSecond` | Finalized distinct jobs divided by the elapsed time between the first and last qualifying finish timestamps in the window.                            |
+
+### Why two throughput values?
+
+The full-window value answers:
+
+**“How many jobs reached a final outcome per second or minute across this whole period?”**
+
+Idle periods are included.
+
+The observed first-to-last value answers:
+
+**“How quickly did final outcomes occur across the span between the first and last finish in this window?”**
+
+It can be much higher if completions cluster in a short burst, and can be unstable when the elapsed span is tiny.
+
+The throughput calculations count distinct jobs with `SUCCEEDED` or `TERMINAL_FAILURE` outcomes. This is not the same as API job-submission rate, and it is not the same as counting every attempt.
+
+### Metrics interpretation notes
+
+* Queue size and processing count are current snapshots; historical counters use the selected window.
+* Attempt outcome counters count attempts, not necessarily unique jobs.
+* The queue-wait formula is creation-to-attempt-start, so retry queue wait is not isolated.
+* The normal processor path writes job state and attempt history together. Exceptional processing errors and stale recovery may not create matching attempt-history rows, so historical failure metrics can omit those paths.
+* Metrics queries run separately. During active processing, the queue snapshot and historical values can represent slightly different moments.
+
+These definitions describe what the code calculates today and help avoid confusing the metrics during active processing.
 
 ---
 
-## 📁 Project Structure
+## Worker processing benchmark
 
-```
-FlowForge/
-│
-├── src/
-│   ├── server.ts
-│   │
-│   ├── db/
-│   │    ├── connection.ts
-│   │    └── migrations/
-│   │       └── 001_create_jobs.sql
-│   │
-│   ├── utils/
-│   │   └─── random.ts
-│   │
-│   ├── jobs/
-│   │   ├── job.routes.ts
-│   │   ├── job.controller.ts
-│   │   ├── job.service.ts
-│   │   ├── job.repository.ts
-│   │   └── job.types.ts
-│   │
-│   └── worker/
-│       ├── worker.ts
-│       ├── worker.processor.ts
-│       └── launcher.ts
-│
-├── .env.example
-├── .gitignore
-├── package.json
-├── README.md
-├── LICENSE
-├── package-lock.json
-└── tsconfig.json
-```
+FlowForge was benchmarked locally using multiple worker processes and a buffered job-claiming setup.
 
-The repository also includes migrations `002_add_worker_id.sql`,
-`003_add_claimed_at.sql`, and `004_add_job_indexes.sql`, plus the health route
-and PostgreSQL notification listener shown in the source tree.
+### Benchmark configuration
 
-Additional source paths:
+| Setting | Value |
+| --- | ---: |
+| Worker processes | 40 |
+| Concurrency per worker | 100 |
+| Buffer size | 110 jobs per worker |
+| Buffer threshold | 10 jobs per worker |
+| Average processing time | ~758 ms |
+| Test machine | Dell 14 Plus DB14255 |
+| CPU | AMD Ryzen AI 5 340W |
+| Graphics | AMD Radeon 840M |
+
+### Observed results
+
+| Metric | Result |
+| --- | ---: |
+| Typical interval throughput | ~700 jobs/sec |
+| Peak interval throughput | ~1,200 jobs/sec |
+| Jobs submitted by Autocannon | 50,000 |
+| Time taken to submit 50,000 jobs | 37.04 seconds |
+| Autocannon submission rate | ~1,350 jobs/sec |
+
+**Important:** The Autocannon figure represents the rate at which jobs were submitted to the API. It is not the same as worker processing or job-completion throughput. The worker throughput figures reflect interval-based measurements observed during the test.
+
+These are local benchmark results, not guaranteed performance figures. Throughput can vary with job workload, database configuration, system load, and hardware.
+
+---
+
+## Tech stack and project structure
+
+### Stack
+
+| Technology | Role                                                              |
+| ---------- | ----------------------------------------------------------------- |
+| TypeScript | Application and worker implementation                             |
+| Node.js    | Runtime and worker child processes                                |
+| Fastify    | HTTP API                                                          |
+| PostgreSQL | Persistent jobs, attempt history, coordination, and notifications |
+| `pg`       | PostgreSQL client and connection pool                             |
+| `dotenv`   | Environment configuration                                         |
+| `tsx`      | TypeScript development execution                                  |
+
+### Source layout
 
 ```text
-src/health/health.routes.ts
-src/workers/jobs.listener.ts
-src/workers/worker.ts
-src/workers/worker.processor.ts
-src/workers/launcher.ts
+src/
+├── server.ts                 # Fastify application and route registration
+├── db/
+│   ├── connection.ts         # PostgreSQL pool
+│   └── migrations/           # Incremental schema changes
+├── jobs/
+│   ├── jobs.routes.ts        # Job HTTP routes
+│   ├── jobs.controller.ts    # Request/response handling
+│   ├── jobs.service.ts       # Workload setup and job operations
+│   ├── jobs.repository.ts    # SQL, claiming, state changes, leases, recovery
+│   └── jobs.types.ts         # Job/request types
+├── workers/
+│   ├── launcher.ts           # Starts configured worker child processes
+│   ├── worker.ts              # Worker loop, listener, lease, shutdown
+│   ├── worker.processor.ts   # Simulated execution and attempt persistence
+│   └── jobs.listener.ts      # PostgreSQL LISTEN/NOTIFY and reconnect
+├── metrics/
+│   ├── metrics.routes.ts     # GET /metrics and query validation
+│   ├── metrics.controller.ts # API response and configured capacity
+│   ├── metrics.service.ts    # Window parsing and metric calculations
+│   ├── metrics.repository.ts # SQL aggregates and snapshots
+│   └── metrics.types.ts      # Metrics/request/result types
+└── health/
+    └── health.routes.ts      # Database health endpoint
 ```
 
-### Responsibilities
-
-| Layer | Responsibility |
-|---|---|
-| Routes | HTTP endpoint definitions |
-| Controllers | Request/response handling |
-| Services | Application/business logic |
-| Repository | PostgreSQL queries |
-| Worker | Worker process lifecycle |
-| Processor | Job fetching, buffering and processing |
-| DB | PostgreSQL connection pool |
-
 ---
 
-## 🛠️ Tech Stack
+## Run locally
 
-| Technology | Purpose |
-|---|---|
-| TypeScript | Backend language |
-| Node.js | Runtime |
-| Fastify | HTTP framework |
-| PostgreSQL | Job persistence and queue coordination |
-| `pg` | PostgreSQL client |
-| `dotenv` | Environment configuration |
-| `tsx` | TypeScript execution |
-| Git | Version control |
+### Prerequisites
 
----
+* Node.js and npm
+* PostgreSQL
+* Git
 
-# 🚀 Getting Started
-
-## Prerequisites
-
-- Node.js
-- npm
-- PostgreSQL
-- Git
-
----
-
-## Installation
+### 1. Clone and install
 
 ```bash
-git clone <YOUR_REPOSITORY_URL>
+git clone https://github.com/guptakrish490/FlowForge.git
 cd FlowForge
 npm install
 ```
 
----
+### 2. Configure environment
 
-## Environment Variables
+Create a `.env` file in the project root. Adjust values for your PostgreSQL instance and local test:
 
-Create a `.env` file:
-
-```env
-DATABASE_URL=postgresql://username:password@localhost:5432/flowforge
+```dotenv
+PORT=3000
+DATABASE_URL=postgresql://<user>:<password>@localhost:5432/flowforge
 
 WORKER_COUNT=5
 WORKER_CONCURRENCY=10
@@ -422,124 +430,91 @@ JOB_RECOVERY_INTERVAL_MS=3000
 IDLE_TIMEOUT_MS=10000
 ```
 
-### Configuration
+Worker settings such as lease timeout, recovery interval, buffer size, concurrency, and database pool size should be chosen for the test machine.
 
-| Variable | Purpose |
-|---|---|
-| `DATABASE_URL` | PostgreSQL connection string |
-| `WORKER_COUNT` | Number of worker processes |
-| `WORKER_CONCURRENCY` | Concurrent jobs per worker |
-| `BUFFER_SIZE` | Jobs claimed into a worker buffer |
-| `BUFFER_THRESHOLD` | Buffer refill threshold |
-| `DB_POOL_MAX` | Maximum PostgreSQL connections per worker process |
-| `JOB_LEASE_TIMEOUT_MS` | Time before a processing job is considered stale |
-| `JOB_RECOVERY_INTERVAL_MS` | Interval for recovering stale jobs |
-| `IDLE_TIMEOUT_MS` | Wait before checking an idle queue again |
+### 3. Create the database and apply migrations
 
----
+Create a PostgreSQL database named `flowforge`, then apply the SQL migrations in `src/db/migrations` in numerical order.
 
-## Database Setup
-
-Create the database:
-
-```sql
-CREATE DATABASE flowforge;
-```
-
-Run the migrations in order:
+From the repository root, on a shell that supports this loop:
 
 ```bash
-psql "$DATABASE_URL" -f src/db/migrations/001_create_jobs.sql
-psql "$DATABASE_URL" -f src/db/migrations/002_add_worker_id.sql
-psql "$DATABASE_URL" -f src/db/migrations/003_add_claimed_at.sql
-psql "$DATABASE_URL" -f src/db/migrations/004_add_job_indexes.sql
+for file in src/db/migrations/*.sql; do
+  psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f "$file"
+done
 ```
 
-Migration 004 adds partial indexes used by the queue-claim and stale-job
-recovery queries.
+Use a fresh database when verifying the complete migration sequence. If using a migration runner with a tracking table, follow that runner's procedure instead of reapplying migrations blindly.
 
----
+### 4. Build
 
-# ▶️ Running the Project
+```bash
+npm run build
+```
+For a compiled run, build the project and launch the compiled server and worker launcher using the entrypoints produced under `dist/`.
 
-## Start the API
+### 5. Start the API
 
 ```bash
 npm run dev
 ```
 
-The API runs on:
+The server defaults to port `3000` unless `PORT` is set.
 
-```
-http://localhost:3000
-```
+### 6. Start the single worker
 
-
-
----
-
-## Start Workers
+In another terminal:
 
 ```bash
 npm run dev:worker
 ```
+Or, start the configured number of workers through the launcher:
 
-`npm run dev:worker` starts one worker process directly.
-`npm run dev:launcher` starts the launcher, which reads `WORKER_COUNT` and starts
-the configured number of worker processes.
+### Start multiple workers
 
-For a compiled deployment, run `npm run build`, then use `npm run start` and
-either `npm run start:worker` or `npm run start:launcher` in separate processes.
+In another terminal:
 
-Example:
-
-```
-WORKER_COUNT=5
+```bash
+npm run dev:launcher
 ```
 
-results in:
-
-```
-Worker-1
-Worker-2
-Worker-3
-Worker-4
-Worker-5
-```
+The launcher reads `WORKER_COUNT` and starts that many worker processes.
 
 ---
 
-# 📡 API
+## HTTP API
 
-## Health Check
+The API uses a response envelope with `success`, `status`, `error`, and `data` fields.
+
+### Health check
 
 ```http
 GET /health
 ```
 
-The endpoint checks PostgreSQL with `SELECT 1`. It returns `200` when the API
-and database are available, and `503` when the database is unavailable.
+Checks whether PostgreSQL is reachable. This is a database connectivity check, not a complete readiness check for every worker process.
 
-## Create Job
+### Create a job
 
 ```http
 POST /jobs
+Content-Type: application/json
 ```
 
-Example:
+Request:
 
 ```json
 {
-  "type": "email",
-  "workload": "MEDIUM"
+  "type": "demo-task",
+  "workload": "LOW"
 }
 ```
 
-The server generates execution parameters based on the workload and stores the job as `QUEUED`.
+`type` is a non-empty string up to 50 characters. `workload` must be `LOW`, `MEDIUM`, or `HIGH`. Execution duration, retry allowance, and failure probability are generated from workload configuration.
 
----
+A successful create returns HTTP `201` and the created job.
 
-## Get Jobs
+### List jobs
 
 ```http
 GET /jobs
@@ -547,262 +522,125 @@ GET /jobs
 
 Returns stored jobs.
 
----
-
-## Get Job
+### Get one job
 
 ```http
 GET /jobs/:id
 ```
 
-Returns a specific job.
+Returns the requested job, or `404` if it does not exist.
+
+### Read metrics
+
+```http
+GET /metrics?window=5m
+```
+
+Returns current queue state plus time-window metrics. See [Metrics and observability](#metrics-and-observability) for the exact field definitions.
 
 ---
 
-# 📊 Performance
+## Database model
 
-<!-- Benchmark results are intentionally omitted until they are reproducible. -->
-<!--
-FlowForge has been tested with a **5,000-job workload** to study the effect of worker count, concurrency, and buffer size.
+### `jobs`
 
-> These are local experimental measurements using simulated workloads. They are not production benchmarks.
+The `jobs` table is the queue's source of truth. It stores job identity, workload configuration, status, retry counter, timestamps, and current worker ownership/lease fields.
 
-### Worker Scaling
+| Field                 | Purpose                                               |
+| --------------------- | ----------------------------------------------------- |
+| `id`                  | Job identifier                                        |
+| `type`                | Job type/name                                         |
+| `workload`            | `LOW`, `MEDIUM`, or `HIGH`                            |
+| `max_retries`         | Retry allowance                                       |
+| `failure_probability` | Simulated failure chance                              |
+| `burst_time_ms`       | Simulated execution duration                          |
+| `status`              | `QUEUED`, `PROCESSING`, `COMPLETED`, or `FAILED`      |
+| `retry_attempt`       | Retry count maintained by the lifecycle               |
+| `created_at`          | Job creation time                                     |
+| `started_at`          | Current/last processing-start field in the job record |
+| `completed_at`        | Successful completion timestamp                       |
+| `worker_id`           | Current worker owner                                  |
+| `claimed_at`          | Lease timestamp used for renewal and stale recovery   |
+| `updated_at`          | Last job-state update                                 |
 
-Configuration:
+### `jobs_attempts`
 
-```
-Concurrency = 10
-Buffer = 60
-Jobs = 5,000
-```
+The attempts table stores historical execution information separately from current job state.
 
-| Workers | Run 1 | Run 2 | Run 3 |
-|---:|---:|---:|---:|
-| 1 | 1514.83s | 1520.86s | 1511.11s |
-| 5 | 249.02s | 250.86s | 247.18s |
-| 10 | 150.02s | 153.44s | 150.02s |
-| 15 | 104.94s | 104.51s | 101.54s |
-| 20 | 83.08s | 92.19s | 83.01s |
-| 40 | 63.35s | 63.29s | 59.03s |
+| Field            | Purpose                                                 |
+| ---------------- | ------------------------------------------------------- |
+| `job_id`         | Parent job                                              |
+| `attempt_number` | 1-based execution attempt number                        |
+| `started_at`     | Attempt start                                           |
+| `finished_at`    | Attempt finish; nullable while unfinished               |
+| `outcome`        | `SUCCEEDED`, `RETRYABLE_FAILURE`, or `TERMINAL_FAILURE` |
 
-### Concurrency Scaling
-
-Configuration:
-
-```
-Workers = 10
-Buffer = 60
-Jobs = 5,000
-```
-
-| Concurrency | Run 1 | Run 2 | Run 3 |
-|---:|---:|---:|---:|
-| 10 | 152.72s | 152.64s | 152.11s |
-| 20 | 81.26s | 81.24s | 81.03s |
-| 40 | 59.67s | 59.44s | 39.85s |
-| 50 | 46.49s | 46.38s | 46.38s |
-| 60 | 39.89s | 35.69s | 35.48s |
-| 75 | 34.42s | 33.06s | 34.18s |
-| 100 | 32.12s | 33.06s | 32.19s |
-| 125 | 35.70s | 32.54s | 32.68s |
-| 150 | 34.88s | 34.33s | 32.96s |
-| 200 | 34.13s | 34.18s | 34.19s |
-
-### Buffer Size
-
-Configuration:
-
-```
-Workers = 10
-Concurrency = 100
-Jobs = 5,000
-```
-
-| Buffer | Run 1 | Run 2 | Run 3 | Average |
-|---:|---:|---:|---:|---:|
-| 60 | 32.12s | 33.06s | 32.19s | ~32.46s |
-| 110 | 30.65s | 30.14s | 30.33s | ~30.37s |
-| 210 | 31.38s | 31.69s | 30.98s | ~31.35s |
-
-The lowest average among these tested configurations was approximately:
-
-```
-30.37 seconds
-```
-
-for:
-
-```
-Workers      = 10
-Concurrency  = 100
-Buffer       = 110
-Jobs         = 5,000
-```
-
-Approximate measured throughput:
-
-```
-5000 / 30.37 ≈ 164.6 jobs/sec
-```
-
-These measurements describe the tested workload and environment; they are not intended as a universal performance limit.
--->
+This separation lets the queue row represent the latest state while attempt rows preserve the history of recorded executions.
 
 ---
 
-## 📈 What the Benchmarks Show
+## Design decisions
 
-The experiments demonstrate three important behaviors:
+### PostgreSQL as storage and coordination
 
-- Increasing worker count can significantly reduce processing time.
-- Increasing concurrency provides large gains initially, followed by diminishing returns.
-- Buffer size affects performance, but increasing it indefinitely does not necessarily improve throughput.
+Using PostgreSQL keeps the project focused on durable state, transactions, row locking, and concurrency. It avoids introducing another broker before the core queue mechanics are understood.
 
-The project therefore treats worker count, concurrency, and buffer size as **tunable system parameters** rather than fixed magic numbers.
+### `SKIP LOCKED` for competing workers
 
----
+Workers can claim different queued rows concurrently. This avoids making every worker wait behind the same oldest row, while the database remains responsible for safe claiming.
 
-# 🧪 Engineering Issue Discovered During Testing
+### Batch claims and local buffers
 
-<!-- Engineering benchmark notes are intentionally omitted until they are reproducible.
-High worker counts initially caused PostgreSQL connection exhaustion.
+Batching trades some immediacy for fewer database round trips. Buffer size and refill threshold are configurable so their impact can be measured.
 
-Each Node.js worker process creates its own `pg.Pool`.
+### Notifications are hints, not the queue
 
-With a default pool size of 10:
+`LISTEN/NOTIFY` helps workers react promptly, but the durable jobs table remains authoritative. Polling and recovery checks provide a fallback.
 
-```
-60 workers × 10 connections
-= up to 600 possible connections
-```
+### Leases for ownership and recovery
 
-This resulted in errors similar to:
+A worker's ownership is time-bounded. Lease renewal and stale-job recovery allow the queue to make progress after a worker disappears. Leases improve recoverability, but they do not by themselves prevent duplicate external side effects after a crash.
 
-```
-too many clients already
-```
+### Metrics separate current state from recent history
 
-The project now exposes pool size through:
-
-```
-DB_POOL_MAX=2
-```
-
-This allows worker scaling experiments without unnecessarily creating large numbers of database connections.
-
-This issue was particularly useful because it exposed a real systems constraint that wasn't obvious from the application-level code.
--->
+Queue depth and processing count describe the present. Outcome counts, durations, and throughput describe events in a chosen historical window.
 
 ---
 
-# 🗺️ Roadmap
+## Current scope and limitations
 
-### Reliability
+FlowForge is complete as a learning and portfolio implementation of a configurable PostgreSQL-backed worker queue. Its current scope has some clear boundaries:
 
-- [x] Add `worker_id` to jobs
-- [x] Detect stale `PROCESSING` jobs
-- [x] Implement crash recovery
-- [x] Add job ownership / leases
-- [x] Define retry behavior for crashed workers
+* **No exactly-once guarantee:** work can be repeated after a worker crash or stale-lease recovery. External side effects would need idempotency protection.
+* **No dedicated dead-letter queue or retry backoff policy:** terminal failures are represented by job state; retry behavior is currently immediate/requeue-based.
+* **Attempt history is not exhaustive across every exceptional path:** the normal processor result is transactionally recorded with the job update, but processor exceptions and stale recovery may update job state without a matching attempt-history record.
+* **Queue-wait metric is creation-to-attempt-start:** retry waits are not separately isolated by the current formula.
+* **Metrics are monitoring snapshots:** separate queries can observe slightly different moments.
 
-### Worker lifecycle
-
-- [x] Graceful shutdown
-- [x] Signal handling
-- [x] Safe worker termination
-
-### Queue efficiency
-
-- [x] PostgreSQL `LISTEN/NOTIFY`
-- [x] Reduce unnecessary polling with notification wake-up
-- [x] Event-driven worker wake-up
-- [x] Listener reconnect with backoff
-
-### Observability
-
-- [ ] Structured logging
-- [ ] Queue depth metrics
-- [ ] Processing latency
-- [ ] Throughput metrics
-- [ ] Retry/failure metrics
-- [ ] Worker health monitoring
-
-### Reliability features
-
-- [ ] Dead-letter queue
-- [ ] Retry backoff
-- [ ] Idempotency
-- [x] Lease heartbeats
-- [x] Processor-error recovery
-
-### Benchmarking
-
-- [ ] CPU-bound workloads
-- [ ] I/O-bound workloads
-- [ ] Mixed workloads
-- [ ] Larger job volumes
-- [ ] Repeatable benchmark scripts
-- [ ] Automated benchmark reports
+These limitations are documented so the project's guarantees are clear. They do not erase the concurrency, persistence, retry, recovery, and measurement work implemented.
 
 ---
 
-# 📌 Current Status
+## What this project demonstrates
 
-**FlowForge is currently in active development.**
+FlowForge provides hands-on experience with:
 
-### Implemented
+* asynchronous job processing;
+* concurrent worker processes;
+* atomic database claiming;
+* transaction boundaries;
+* retries and terminal outcomes;
+* leases and stale-work recovery;
+* graceful process shutdown;
+* PostgreSQL notification-driven wake-up with fallback polling;
+* metric interpretation for current queue state and historical outcomes.
 
-- [x] Fastify API
-- [x] `/health` database health check
-- [x] PostgreSQL persistence
-- [x] Job creation and retrieval
-- [x] Job lifecycle
-- [x] Single worker processing
-- [x] Concurrent processing
-- [x] Multiple worker processes
-- [x] Local buffering
-- [x] Retry handling
-- [x] Failure simulation
-- [x] Atomic job claiming
-- [x] `FOR UPDATE SKIP LOCKED`
-- [x] Configurable database pool size
-- [x] Worker ownership and leases
-- [x] Stale job recovery
-- [x] PostgreSQL `LISTEN/NOTIFY` wake-up
-- [x] Queue and processing indexes
-- [x] Listener reconnect with polling fallback
-
-### Next
-
-- [ ] Cancellation/fencing after lease loss
-- [ ] Structured observability and metrics
-- [ ] Automated integration tests
+**The central learning goal:** understand how a backend behaves when concurrency, failures, database contention, and scale become part of the design—not just how to create and retrieve records.
 
 ---
 
-## 🎯 Project Goal
+## License
 
-FlowForge is being built to understand the engineering problems behind systems that process large amounts of asynchronous work:
+#### MIT LICENSE
 
-```mermaid
-flowchart LR
-    Jobs["Jobs"] --> Queue["Persistent Queue"]
-    Queue --> Workers["Multiple Workers"]
-    Workers --> Concurrency["Concurrent Processing"]
-    Concurrency --> Reliability["Retries & Recovery"]
-    Reliability --> Scale["Scalability & Observability"]
-```
-
-The goal is not simply to build a job queue.
-
-The goal is to understand **how a backend system behaves when concurrency, failures, database contention, and scale enter the picture.**
-
----
-
-## 📄 License
-
-MIT
---- 
-
-### **Thank you✨**
+ **Made with ❤️**
